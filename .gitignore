@@ -1,0 +1,39 @@
+# Environment
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+
+# Modal
+.modal/
+
+# Claude Code local settings
+.claude/
+
+# Data (lives on Modal volume, not in git)
+data/
+*.json.backup
+
+# Development files
+checkpoint*.txt
+oura_agent.md
+
+# User profile (use profile.example.json as template)
+profile.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

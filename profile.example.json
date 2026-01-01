@@ -1,0 +1,34 @@
+{
+  "user": {
+    "name": "Your Name",
+    "age": 30,
+    "timezone": "America/New_York",
+    "chronotype": "slightly_early",
+    "target_bedtime": "23:00",
+    "target_wake": "07:00",
+    "target_sleep_duration_hours": 7.5
+  },
+  "preferences": {
+    "communication_style": "direct",
+    "include_emoji_status": true,
+    "workout_schedule": "flexible",
+    "primary_goals": [
+      "optimize_deep_sleep",
+      "maintain_hrv",
+      "cognitive_performance"
+    ]
+  },
+  "tracked_interventions": [
+    "magnesium_glycinate",
+    "apigenin",
+    "ashwagandha",
+    "alcohol",
+    "caffeine_cutoff",
+    "sauna",
+    "cold_exposure",
+    "exercise_intensity",
+    "exercise_timing",
+    "meditation",
+    "blue_light_blocking"
+  ]
+}
