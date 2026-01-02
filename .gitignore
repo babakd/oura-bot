@@ -24,6 +24,7 @@ data/
 # Development files
 checkpoint*.txt
 oura_agent.md
+codex_fixes.md
 
 # User profile (use profile.example.json as template)
 profile.json
