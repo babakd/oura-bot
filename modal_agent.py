@@ -429,29 +429,58 @@ def update_baselines(baselines: dict, new_metrics: dict, date: str, window: int 
 
 
 def load_interventions(date: str) -> dict:
-    """Load interventions for a given date. Returns full data structure."""
-    interventions_file = INTERVENTIONS_DIR / f"{date}.json"
-    if interventions_file.exists():
-        with open(interventions_file) as f:
+    """
+    Load interventions for a given date. Returns full data structure.
+
+    Supports both JSONL (new format) and JSON (legacy format) for backwards compatibility.
+    """
+    # Try JSONL first (new format)
+    jsonl_file = INTERVENTIONS_DIR / f"{date}.jsonl"
+    if jsonl_file.exists():
+        entries = []
+        with open(jsonl_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+        return {"date": date, "entries": entries}
+
+    # Fall back to JSON (legacy format)
+    json_file = INTERVENTIONS_DIR / f"{date}.json"
+    if json_file.exists():
+        with open(json_file) as f:
             data = json.load(f)
             # Migrate old format if needed
             if "interventions" in data and "entries" not in data:
                 data["entries"] = [
                     {"time": e.get("timestamp", "").split("T")[1][:5] if "T" in e.get("timestamp", "") else "",
                      "raw": f"{e.get('name', '')} ({e.get('details', '')})" if e.get('details') else e.get('name', ''),
-                     "parsed": [{"type": e.get("type"), "name": e.get("name"), "details": e.get("details")}] if e.get("name") else None}
+                     "cleaned": f"{e.get('name', '')} ({e.get('details', '')})" if e.get('details') else e.get('name', '')}
                     for e in data["interventions"]
                 ]
                 del data["interventions"]
             return data
+
     return {"date": date, "entries": []}
 
 
 def save_interventions(date: str, data: dict):
-    """Save interventions for a given date (used after Claude parses them)."""
-    interventions_file = INTERVENTIONS_DIR / f"{date}.json"
-    with open(interventions_file, 'w') as f:
-        json.dump(data, f, indent=2)
+    """
+    Save interventions for a given date.
+
+    Writes JSONL format and removes any legacy JSON file.
+    """
+    jsonl_file = INTERVENTIONS_DIR / f"{date}.jsonl"
+    json_file = INTERVENTIONS_DIR / f"{date}.json"
+
+    # Write as JSONL
+    with open(jsonl_file, 'w') as f:
+        for entry in data.get("entries", []):
+            f.write(json.dumps(entry) + "\n")
+
+    # Remove legacy JSON file if it exists (migration complete)
+    if json_file.exists():
+        json_file.unlink()
 
 
 def load_historical_interventions(days: int = 28) -> dict:
@@ -528,8 +557,8 @@ def prune_old_data():
         if file_date < cutoff_str:
             brief_file.unlink()
 
-    # Prune interventions
-    for intervention_file in INTERVENTIONS_DIR.glob("*.json"):
+    # Prune interventions (both JSONL and legacy JSON)
+    for intervention_file in INTERVENTIONS_DIR.glob("*.json*"):
         file_date = intervention_file.stem
         if file_date < cutoff_str:
             intervention_file.unlink()
@@ -624,7 +653,7 @@ TODAY'S SUMMARY METRICS
 ```
 
 ═══════════════════════════════════════════════════════════════════════════════
-BASELINES (60-day rolling averages from before the recent 28-day window)
+BASELINES (rolling 60-day averages, updated daily)
 ═══════════════════════════════════════════════════════════════════════════════
 
 ```json
@@ -659,16 +688,9 @@ INTERVENTIONS (last 28 days)
         for date, data in sorted(historical_interventions.items(), reverse=True):
             entries = data.get("entries", [])
             for e in entries:
-                time = e.get("time", "")
-                raw = e.get("raw", "")
-                parsed = e.get("parsed")
-                if parsed:
-                    # Show parsed data
-                    items = ", ".join([f"{p.get('name', 'unknown')}" + (f" ({p.get('details', '')})" if p.get('details') else "") for p in parsed])
-                    user_prompt += f"{date} {time}: {items}\n"
-                else:
-                    # Show raw (Claude should interpret)
-                    user_prompt += f"{date} {time}: [raw] {raw}\n"
+                # Use cleaned version for analysis, fall back to raw for old entries
+                display = e.get("cleaned", e.get("raw", "unknown"))
+                user_prompt += f"{date}: {display}\n"
     else:
         user_prompt += "No interventions logged yet."
 
@@ -711,84 +733,6 @@ Be specific with numbers. Use status emojis: ✅ (normal), ⚠️ (notable devia
     )
 
     return response.content[0].text
-
-
-def parse_unparsed_interventions(api_key: str, interventions_by_date: dict) -> dict:
-    """
-    Use Claude to parse any interventions with parsed=null.
-    Returns updated interventions_by_date with parsed fields filled in.
-    """
-    import anthropic
-
-    # Collect all unparsed entries
-    unparsed = []
-    for date, data in interventions_by_date.items():
-        for i, entry in enumerate(data.get("entries", [])):
-            if entry.get("parsed") is None and entry.get("raw"):
-                unparsed.append({"date": date, "index": i, "raw": entry["raw"]})
-
-    if not unparsed:
-        return interventions_by_date
-
-    # Build prompt for Claude
-    prompt = """Parse these health intervention entries into structured data.
-
-For each entry, extract:
-- type: supplement, behavior, consumption, or environment
-- name: canonical name (e.g., "magnesium" not "neuro-mag")
-- Plus any relevant fields: dose, quantity, brand, form, duration, etc.
-
-Entries to parse:
-"""
-    for u in unparsed:
-        prompt += f"\n{u['date']} #{u['index']}: {u['raw']}"
-
-    prompt += """
-
-Respond with ONLY valid JSON (no markdown):
-{
-  "parsed": [
-    {"date": "...", "index": N, "items": [{"type": "...", "name": "...", ...}, ...]},
-    ...
-  ]
-}
-
-Each entry can have multiple items if the message mentioned multiple interventions."""
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    try:
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        result_text = response.content[0].text.strip()
-
-        # Handle markdown code blocks
-        if result_text.startswith("```"):
-            lines = result_text.split("\n")
-            result_text = "\n".join(l for l in lines if not l.startswith("```")).strip()
-
-        result = json.loads(result_text)
-
-        # Update interventions with parsed data
-        for p in result.get("parsed", []):
-            date = p["date"]
-            idx = p["index"]
-            items = p["items"]
-            if date in interventions_by_date:
-                entries = interventions_by_date[date].get("entries", [])
-                if idx < len(entries):
-                    entries[idx]["parsed"] = items
-
-        print(f"Parsed {len(unparsed)} intervention entries")
-
-    except Exception as e:
-        print(f"Error parsing interventions: {e}")
-
-    return interventions_by_date
 
 
 # ============================================================================
@@ -858,11 +802,6 @@ def morning_brief():
         recent_briefs = load_recent_briefs(3)
 
         print(f"Loaded context: {len(historical_metrics)} days of metrics, {len(historical_interventions)} days with interventions")
-
-        # Parse any unparsed interventions and save
-        historical_interventions = parse_unparsed_interventions(anthropic_key, historical_interventions)
-        for date, data in historical_interventions.items():
-            save_interventions(date, data)
 
         # Generate brief with Claude (verbose context)
         print("Generating brief with Claude Opus 4.5...")
@@ -935,7 +874,7 @@ def run_now():
 
 
 @app.function(
-    secrets=[modal.Secret.from_name("telegram")],
+    secrets=[modal.Secret.from_name("telegram"), modal.Secret.from_name("anthropic")],
     volumes={"/data": volume},
 )
 def log_intervention(raw_text: str):
@@ -945,16 +884,18 @@ def log_intervention(raw_text: str):
     Usage:
         modal run modal_agent.py::log_intervention --raw-text "took 2 magnesium capsules"
     """
-    entry = save_intervention_raw(raw_text)
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    cleaned_text = clean_intervention_with_claude(anthropic_key, raw_text)
+    entry = save_intervention_raw(raw_text, cleaned_text)
     volume.commit()
 
     # Confirm via Telegram
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if bot_token and chat_id:
-        send_telegram(f"✓ {raw_text}", bot_token, chat_id)
+        send_telegram(f"✓ {cleaned_text}", bot_token, chat_id)
 
-    print(f"Logged intervention: {raw_text}")
+    print(f"Logged intervention: {cleaned_text}")
     return entry
 
 
@@ -995,10 +936,18 @@ def clear_today_interventions():
     """Clear today's interventions (for removing test data)."""
     ensure_directories()
     today = now_nyc().strftime("%Y-%m-%d")
-    interventions_file = INTERVENTIONS_DIR / f"{today}.json"
+    jsonl_file = INTERVENTIONS_DIR / f"{today}.jsonl"
+    json_file = INTERVENTIONS_DIR / f"{today}.json"
 
-    if interventions_file.exists():
-        interventions_file.unlink()
+    cleared = False
+    if jsonl_file.exists():
+        jsonl_file.unlink()
+        cleared = True
+    if json_file.exists():
+        json_file.unlink()
+        cleared = True
+
+    if cleared:
         volume.commit()
         print(f"Cleared interventions for {today}")
     else:
@@ -1210,34 +1159,76 @@ def backfill_history(days: int = 90):
 # TELEGRAM BOT WEBHOOK
 # ============================================================================
 
-def save_intervention_raw(raw_text: str) -> dict:
-    """Save a raw intervention to today's file. Claude will parse it during the daily brief."""
+def _migrate_json_to_jsonl(date: str):
+    """Migrate legacy .json file to .jsonl format if needed."""
+    json_file = INTERVENTIONS_DIR / f"{date}.json"
+    jsonl_file = INTERVENTIONS_DIR / f"{date}.jsonl"
+
+    # Only migrate if .json exists and .jsonl doesn't
+    if json_file.exists() and not jsonl_file.exists():
+        data = load_interventions(date)  # This reads the .json file
+        if data.get("entries"):
+            with open(jsonl_file, 'w') as f:
+                for entry in data["entries"]:
+                    f.write(json.dumps(entry) + "\n")
+            print(f"Migrated {len(data['entries'])} entries from {json_file} to {jsonl_file}")
+        # Remove legacy file after migration
+        json_file.unlink()
+
+
+def clean_intervention_with_claude(api_key: str, raw_text: str) -> str:
+    """Use Claude to clean/normalize intervention text."""
+    import anthropic
+
+    prompt = f"""Clean and normalize this health intervention log entry. Fix typos, remove filler words, standardize format. Keep it brief (under 10 words ideally).
+
+Input: "{raw_text}"
+
+Output only the cleaned text, nothing else."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=50,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip().strip('"')
+    except Exception as e:
+        print(f"Error cleaning intervention: {e}")
+        return raw_text  # Fall back to raw if cleaning fails
+
+
+def save_intervention_raw(raw_text: str, cleaned_text: str = None) -> dict:
+    """
+    Save an intervention to today's file using atomic append.
+
+    Uses JSONL (one JSON object per line) for append-only writes.
+    This avoids read-modify-write race conditions with the daily job.
+
+    Args:
+        raw_text: Original user input (kept for audit)
+        cleaned_text: Claude-cleaned version (used for display/analysis)
+    """
     today = now_nyc().strftime("%Y-%m-%d")
     time = now_nyc().strftime("%H:%M")
 
     ensure_directories()
 
-    interventions_file = INTERVENTIONS_DIR / f"{today}.json"
+    # Migrate legacy .json to .jsonl if needed (before first write)
+    _migrate_json_to_jsonl(today)
 
-    if interventions_file.exists():
-        with open(interventions_file) as f:
-            data = json.load(f)
-    else:
-        data = {"date": today, "entries": []}
-
-    # Handle old format migration
-    if "interventions" in data and "entries" not in data:
-        data["entries"] = []
+    interventions_file = INTERVENTIONS_DIR / f"{today}.jsonl"
 
     entry = {
         "time": time,
         "raw": raw_text,
-        "parsed": None
+        "cleaned": cleaned_text or raw_text,  # Fall back to raw if no cleaned version
     }
-    data["entries"].append(entry)
 
-    with open(interventions_file, 'w') as f:
-        json.dump(data, f, indent=2)
+    # Atomic append - no read required, avoids race conditions
+    with open(interventions_file, 'a') as f:
+        f.write(json.dumps(entry) + "\n")
 
     return entry
 
@@ -1245,14 +1236,8 @@ def save_intervention_raw(raw_text: str) -> dict:
 def get_today_interventions() -> list:
     """Get today's logged interventions."""
     today = now_nyc().strftime("%Y-%m-%d")
-    interventions_file = INTERVENTIONS_DIR / f"{today}.json"
-
-    if interventions_file.exists():
-        with open(interventions_file) as f:
-            data = json.load(f)
-            # Support both old and new format
-            return data.get("entries", data.get("interventions", []))
-    return []
+    data = load_interventions(today)
+    return data.get("entries", [])
 
 
 def format_intervention_response(api_key: str, just_logged: str) -> str:
@@ -1303,6 +1288,10 @@ def get_latest_brief() -> str:
     return "No briefs available yet."
 
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
 @app.function(
     secrets=[
         modal.Secret.from_name("telegram"),
@@ -1311,7 +1300,7 @@ def get_latest_brief() -> str:
     volumes={"/data": volume},
 )
 @modal.fastapi_endpoint(method="POST")
-def telegram_webhook(request: dict):
+async def telegram_webhook(request: Request):
     """
     Telegram webhook endpoint for receiving messages.
 
@@ -1322,15 +1311,24 @@ def telegram_webhook(request: dict):
         /help - Show available commands
 
     Natural language:
-        Any other message is parsed by Claude to extract interventions.
+        Any other message is cleaned by Claude and logged.
         Examples: "just had 2 neuro-mag capsules", "20 min sauna"
     """
+    # Validate webhook secret (Telegram sends this in header when configured)
+    webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    if webhook_secret:
+        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if received_secret != webhook_secret:
+            print(f"Webhook auth failed: invalid secret token")
+            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
 
     # Parse the incoming update
-    message = request.get("message", {})
+    body = await request.json()
+    message = body.get("message", {})
     text = message.get("text", "")
     sender_chat_id = str(message.get("chat", {}).get("id", ""))
 
@@ -1348,9 +1346,10 @@ def telegram_webhook(request: dict):
         # Extract everything after /log
         raw_text = text[4:].strip()
         if raw_text:
-            save_intervention_raw(raw_text)
+            cleaned_text = clean_intervention_with_claude(anthropic_key, raw_text)
+            save_intervention_raw(raw_text, cleaned_text)
             volume.commit()
-            response_text = format_intervention_response(anthropic_key, raw_text)
+            response_text = format_intervention_response(anthropic_key, cleaned_text)
         else:
             response_text = "Usage: /log <intervention>\nExamples:\n  /log magnesium 400mg\n  /log sauna 20min\n  /log 2 drinks of wine"
 
@@ -1359,9 +1358,9 @@ def telegram_webhook(request: dict):
         if entries:
             lines = ["Today's interventions:"]
             for e in entries:
-                time = e.get("time", "")
-                raw = e.get("raw", e.get("name", "unknown"))  # Support old format
-                lines.append(f"  • {raw} @ {time}")
+                # Show cleaned version, fall back to raw for old entries
+                display_text = e.get("cleaned", e.get("raw", e.get("name", "unknown")))
+                lines.append(f"  • {display_text}")
             response_text = "\n".join(lines)
         else:
             response_text = "No interventions logged today."
@@ -1371,9 +1370,17 @@ def telegram_webhook(request: dict):
 
     elif text.startswith("/clear"):
         today = now_nyc().strftime("%Y-%m-%d")
-        interventions_file = INTERVENTIONS_DIR / f"{today}.json"
-        if interventions_file.exists():
-            interventions_file.unlink()
+        jsonl_file = INTERVENTIONS_DIR / f"{today}.jsonl"
+        json_file = INTERVENTIONS_DIR / f"{today}.json"
+        cleared = False
+        # Clear both formats if they exist
+        if jsonl_file.exists():
+            jsonl_file.unlink()
+            cleared = True
+        if json_file.exists():
+            json_file.unlink()
+            cleared = True
+        if cleared:
             volume.commit()
             response_text = f"Cleared interventions for {today}"
         else:
@@ -1396,10 +1403,11 @@ Or just type naturally:
         response_text = "Unknown command. Try /help"
 
     else:
-        # Natural language - store raw, Claude will parse during daily brief
-        save_intervention_raw(text)
+        # Natural language - clean and store
+        cleaned_text = clean_intervention_with_claude(anthropic_key, text)
+        save_intervention_raw(text, cleaned_text)
         volume.commit()
-        response_text = format_intervention_response(anthropic_key, text)
+        response_text = format_intervention_response(anthropic_key, cleaned_text)
 
     # Send response if we have one
     if response_text:
@@ -1414,96 +1422,3 @@ def main():
     print("Triggering morning brief...")
     result = run_now.remote()
     print(f"Result: {result}")
-
-
-# ============================================================================
-# LOCAL TESTING (without Modal)
-# ============================================================================
-
-def test_local():
-    """Run locally for testing (uses .env file)."""
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    # Use local data directory for testing
-    global DATA_DIR, BRIEFS_DIR, RAW_DIR, INTERVENTIONS_DIR, BASELINES_FILE
-    DATA_DIR = Path("./data")
-    BRIEFS_DIR = DATA_DIR / "briefs"
-    RAW_DIR = DATA_DIR / "raw"
-    INTERVENTIONS_DIR = DATA_DIR / "interventions"
-    BASELINES_FILE = DATA_DIR / "baselines.json"
-
-    today = now_nyc().strftime("%Y-%m-%d")
-    yesterday = (now_nyc() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    oura_token = os.environ.get("OURA_ACCESS_TOKEN")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    print(f"Testing locally for {today}")
-
-    ensure_directories()
-
-    # Test Oura API - fetch TODAY's data (reflects last night's sleep)
-    print("\n1. Testing Oura API...")
-    oura_data = get_oura_daily_data(oura_token, today)
-    print(f"   Got data for endpoints: {list(oura_data.keys())}")
-
-    # Extract and show metrics
-    metrics = extract_metrics(oura_data)
-    print(f"\n2. Extracted metrics:")
-    for k, v in metrics.items():
-        print(f"   {k}: {v}")
-
-    # Save raw data
-    raw_file = RAW_DIR / f"{today}.json"
-    with open(raw_file, 'w') as f:
-        json.dump(oura_data, f, indent=2)
-    print(f"\n3. Saved raw data to {raw_file}")
-
-    # Load/create baselines
-    baselines = load_baselines()
-    print(f"\n4. Baselines loaded (data points: {baselines.get('data_points', 0)})")
-
-    # Generate brief
-    print("\n5. Generating brief with Claude Opus 4.5...")
-    brief_content = generate_brief_with_claude(
-        anthropic_key,
-        today,
-        metrics,
-        baselines,
-        [],  # No interventions for test
-        []   # No recent briefs for test
-    )
-    print("\n--- BRIEF ---")
-    print(brief_content)
-    print("--- END BRIEF ---")
-
-    # Save brief
-    brief_file = BRIEFS_DIR / f"{today}.md"
-    with open(brief_file, 'w') as f:
-        f.write(brief_content)
-    print(f"\n6. Saved brief to {brief_file}")
-
-    # Update baselines (deduped by date)
-    baselines = update_baselines(baselines, metrics, today)
-    with open(BASELINES_FILE, 'w') as f:
-        json.dump(baselines, f, indent=2)
-    print("7. Updated baselines")
-
-    # Test Telegram
-    if bot_token and chat_id:
-        print("\n8. Testing Telegram...")
-        if send_telegram(f"*Test Brief — {today}*\n\n{brief_content}", bot_token, chat_id):
-            print("   Telegram send successful!")
-        else:
-            print("   Telegram send failed")
-    else:
-        print("\n8. Skipping Telegram (no credentials)")
-
-    print("\nLocal test complete!")
-
-
-if __name__ == "__main__":
-    test_local()

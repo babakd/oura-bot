@@ -96,7 +96,7 @@ class TestWebhookCommandRouting:
         # Create intervention
         modal_agent.save_intervention_raw("test intervention")
 
-        interventions_file = temp_data_dir / "interventions" / "2026-01-15.json"
+        interventions_file = temp_data_dir / "interventions" / "2026-01-15.jsonl"
         assert interventions_file.exists()
 
         # Clear it
@@ -119,8 +119,8 @@ class TestWebhookCommandRouting:
         entries = modal_agent.get_today_interventions()
 
         assert len(entries) == 3
-        assert all(e["parsed"] is None for e in entries)
         assert entries[0]["raw"] == "took 2 magnesium capsules"
+        assert entries[0]["cleaned"] == "took 2 magnesium capsules"
 
 
 class TestWebhookRequestParsing:
