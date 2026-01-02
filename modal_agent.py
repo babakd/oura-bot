@@ -1215,6 +1215,9 @@ def save_intervention_raw(raw_text: str, cleaned_text: str = None) -> dict:
 
     ensure_directories()
 
+    # Reload volume to see latest commits from other containers
+    volume.reload()
+
     # Migrate legacy .json to .jsonl if needed (before first write)
     _migrate_json_to_jsonl(today)
 
