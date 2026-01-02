@@ -210,3 +210,86 @@ def mock_anthropic_client():
     mock_response.content = [MagicMock(text='{"parsed": []}')]
     mock_client.messages.create.return_value = mock_response
     return mock_client
+
+
+@pytest.fixture
+def sample_oura_stress_response():
+    """Sample Oura daily_stress endpoint response (values in seconds from API)."""
+    return {
+        "data": [{
+            "id": "stress-123",
+            "day": "2026-01-15",
+            "stress_high": 2700,  # 45 minutes in seconds
+            "recovery_high": 10800,  # 180 minutes in seconds
+            "day_summary": "restored"
+        }]
+    }
+
+
+@pytest.fixture
+def sample_oura_workouts_response():
+    """Sample Oura workout endpoint response."""
+    return {
+        "data": [
+            {
+                "id": "workout-123",
+                "activity": "cycling",
+                "calories": 350,
+                "day": "2026-01-15",
+                "distance": 15000.0,
+                "start_datetime": "2026-01-15T07:00:00-05:00",
+                "end_datetime": "2026-01-15T07:45:00-05:00",
+                "intensity": "moderate",
+                "label": None,
+                "source": "manual"
+            },
+            {
+                "id": "workout-124",
+                "activity": "strength_training",
+                "calories": 200,
+                "day": "2026-01-15",
+                "distance": None,
+                "start_datetime": "2026-01-15T18:00:00-05:00",
+                "end_datetime": "2026-01-15T18:30:00-05:00",
+                "intensity": "hard",
+                "label": "Evening lift",
+                "source": "manual"
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def sample_oura_heartrate_response():
+    """Sample Oura heartrate endpoint response (daytime readings)."""
+    return {
+        "data": [
+            {"bpm": 72, "source": "awake", "timestamp": "2026-01-15T09:00:00-05:00"},
+            {"bpm": 75, "source": "awake", "timestamp": "2026-01-15T09:05:00-05:00"},
+            {"bpm": 68, "source": "awake", "timestamp": "2026-01-15T10:00:00-05:00"},
+            {"bpm": 85, "source": "workout", "timestamp": "2026-01-15T07:30:00-05:00"},
+            {"bpm": 70, "source": "awake", "timestamp": "2026-01-15T12:00:00-05:00"},
+            {"bpm": 65, "source": "awake", "timestamp": "2026-01-15T14:00:00-05:00"},
+        ]
+    }
+
+
+@pytest.fixture
+def sample_complete_oura_data_with_new_endpoints(
+    sample_oura_sleep_response,
+    sample_oura_daily_sleep_response,
+    sample_oura_readiness_response,
+    sample_oura_stress_response,
+    sample_oura_workouts_response,
+    sample_oura_heartrate_response
+):
+    """Complete Oura data including stress, workouts, and daytime HR."""
+    return {
+        "sleep": sample_oura_sleep_response["data"],
+        "daily_sleep": sample_oura_daily_sleep_response["data"],
+        "daily_readiness": sample_oura_readiness_response["data"],
+        "daily_activity": [{"score": 85, "steps": 8500}],
+        "daily_stress": sample_oura_stress_response["data"],
+        "workouts": sample_oura_workouts_response["data"],
+        "daytime_hr": sample_oura_heartrate_response["data"],
+    }

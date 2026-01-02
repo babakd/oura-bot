@@ -87,6 +87,9 @@ These are suggestions to help calibrate your thinking, but always consider conte
 | Temperature >0.5°C deviation | Could indicate illness | Also affected by alcohol, late eating, exercise |
 | Sleep efficiency <80% | Suboptimal | Correlate with next-day readiness |
 | RHR >2σ above baseline | Stress/illness indicator | Context matters |
+| Stress high >180 min | High stress day | Correlate with next night's sleep quality |
+| Recovery high <60 min | Low recovery | May indicate overtraining or inadequate rest |
+| Daytime HR >10 bpm above baseline | Elevated | Could indicate stress, illness, or dehydration |
 
 ### Decision Principles
 
@@ -100,10 +103,11 @@ These are suggestions to help calibrate your thinking, but always consider conte
 ### Workout Intensity Guidance
 
 Don't use rigid readiness-to-intensity mapping. Consider:
-- Previous days' training load
+- Previous days' training load (use workout_minutes and workout_calories from history)
 - Accumulated fatigue (multi-day trend)
 - Any scheduled events
 - Recovery debt from recent poor sleep
+- Yesterday's stress/recovery balance
 
 ## Output Format
 
@@ -185,13 +189,21 @@ def get_oura_daily_data(token: str, date: str) -> dict:
     day_after = (target + timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Daily endpoints - fetch for the target date
-    for endpoint in ["daily_sleep", "daily_readiness", "daily_activity"]:
+    for endpoint in ["daily_sleep", "daily_readiness", "daily_activity", "daily_stress"]:
         try:
             result = fetch_oura_data(token, endpoint, date, date)
             data[endpoint] = result.get("data", [])
         except Exception as e:
             print(f"Warning: Failed to fetch {endpoint}: {e}")
             data[endpoint] = []
+
+    # Workouts - can have multiple per day
+    try:
+        result = fetch_oura_data(token, "workout", date, date)
+        data["workouts"] = result.get("data", [])
+    except Exception as e:
+        print(f"Warning: Failed to fetch workouts: {e}")
+        data["workouts"] = []
 
     # Sleep endpoint: fetch sessions that ended on target date
     # Query [day_before, day_after) to capture sessions where day = day_before OR day = date
@@ -212,6 +224,55 @@ def get_oura_daily_data(token: str, date: str) -> dict:
         data["sleep"] = []
 
     return data
+
+
+def get_oura_heartrate(token: str, date: str) -> list:
+    """
+    Fetch daytime heart rate data for a date.
+
+    The heartrate endpoint returns 5-minute interval readings throughout the day.
+    We filter to non-sleep readings to get daytime HR.
+
+    Args:
+        token: Oura API access token
+        date: Date in YYYY-MM-DD format
+
+    Returns:
+        List of HR readings with bpm, source, and timestamp
+    """
+    # Query full day using datetime range
+    start_dt = f"{date}T00:00:00+00:00"
+    end_dt = f"{date}T23:59:59+00:00"
+
+    url = f"{OURA_API_BASE}/heartrate"
+    try:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"start_datetime": start_dt, "end_datetime": end_dt},
+            timeout=30
+        )
+        response.raise_for_status()
+
+        all_readings = response.json().get("data", [])
+        # Filter to non-sleep readings for daytime HR
+        return [r for r in all_readings if r.get("source") != "sleep"]
+    except Exception as e:
+        print(f"Warning: Failed to fetch heartrate: {e}")
+        return []
+
+
+def _workout_duration_minutes(start_dt: str, end_dt: str) -> int:
+    """Calculate workout duration in minutes from ISO datetime strings."""
+    if not start_dt or not end_dt:
+        return 0
+    try:
+        # Parse ISO format timestamps
+        start = datetime.fromisoformat(start_dt.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_dt.replace("Z", "+00:00"))
+        return int((end - start).total_seconds() / 60)
+    except (ValueError, TypeError):
+        return 0
 
 
 def extract_metrics(oura_data: dict) -> dict:
@@ -257,6 +318,37 @@ def extract_metrics(oura_data: dict) -> dict:
         activity = oura_data["daily_activity"][0]
         metrics["activity_score"] = activity.get("score")
         metrics["steps"] = activity.get("steps")
+
+    # Daily stress (API returns seconds, convert to minutes)
+    if oura_data.get("daily_stress"):
+        stress = oura_data["daily_stress"][0]
+        stress_sec = stress.get("stress_high")
+        recovery_sec = stress.get("recovery_high")
+        metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
+        metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
+        metrics["stress_day_summary"] = stress.get("day_summary")
+
+    # Workouts (aggregate if multiple)
+    if oura_data.get("workouts"):
+        workouts = oura_data["workouts"]
+        metrics["workout_count"] = len(workouts)
+        metrics["workout_calories"] = sum(w.get("calories", 0) or 0 for w in workouts)
+        metrics["workout_minutes"] = sum(
+            _workout_duration_minutes(w.get("start_datetime"), w.get("end_datetime"))
+            for w in workouts
+        )
+        metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
+
+    # Daytime heart rate (passed separately via daytime_hr key)
+    if oura_data.get("daytime_hr"):
+        readings = oura_data["daytime_hr"]
+        if readings:
+            bpms = [r["bpm"] for r in readings if r.get("bpm")]
+            if bpms:
+                metrics["daytime_hr_avg"] = round(sum(bpms) / len(bpms), 1)
+                metrics["daytime_hr_min"] = min(bpms)
+                metrics["daytime_hr_max"] = max(bpms)
+                metrics["daytime_hr_samples"] = len(bpms)
 
     return metrics
 
@@ -363,6 +455,32 @@ def extract_detailed_sleep(oura_data: dict) -> dict:
     return detailed
 
 
+def extract_detailed_workouts(oura_data: dict) -> list:
+    """Extract detailed workout data for yesterday (all sessions with full context)."""
+    if not oura_data.get("workouts"):
+        return []
+
+    detailed_workouts = []
+    for workout in oura_data["workouts"]:
+        detailed = {
+            "activity": workout.get("activity"),
+            "label": workout.get("label"),  # User's custom name if set
+            "intensity": workout.get("intensity"),
+            "start_time": workout.get("start_datetime"),
+            "end_time": workout.get("end_datetime"),
+            "duration_minutes": _workout_duration_minutes(
+                workout.get("start_datetime"),
+                workout.get("end_datetime")
+            ),
+            "calories": workout.get("calories"),
+            "distance_meters": workout.get("distance"),
+            "source": workout.get("source"),  # manual, auto-detected, etc.
+        }
+        detailed_workouts.append(detailed)
+
+    return detailed_workouts
+
+
 def load_baselines() -> dict:
     """Load existing baselines or return defaults."""
     if BASELINES_FILE.exists():
@@ -376,16 +494,25 @@ def load_baselines() -> dict:
         "data_points": 0,
         "window_days": BASELINE_WINDOW_DAYS,
         "metrics": {
+            # Sleep metrics
             "sleep_score": {"mean": 75, "std": 10, "values": []},
             "hrv": {"mean": 45, "std": 10, "values": []},
             "deep_sleep_minutes": {"mean": 70, "std": 15, "values": []},
             "light_sleep_minutes": {"mean": 200, "std": 30, "values": []},
             "rem_sleep_minutes": {"mean": 90, "std": 20, "values": []},
-            "readiness": {"mean": 75, "std": 10, "values": []},
-            "resting_hr": {"mean": 55, "std": 5, "values": []},
             "sleep_efficiency": {"mean": 85, "std": 5, "values": []},
             "latency_minutes": {"mean": 15, "std": 10, "values": []},
             "total_sleep_minutes": {"mean": 420, "std": 45, "values": []},
+            # Vitals
+            "resting_hr": {"mean": 55, "std": 5, "values": []},
+            "daytime_hr_avg": {"mean": 70, "std": 8, "values": []},
+            # Recovery
+            "readiness": {"mean": 75, "std": 10, "values": []},
+            "stress_high": {"mean": 60, "std": 30, "values": []},
+            "recovery_high": {"mean": 120, "std": 45, "values": []},
+            # Activity
+            "workout_minutes": {"mean": 30, "std": 20, "values": []},
+            "workout_calories": {"mean": 200, "std": 150, "values": []},
         }
     }
 
@@ -507,13 +634,14 @@ def load_historical_metrics(days: int = 28) -> list:
     return metrics_history
 
 
-def save_daily_metrics(date: str, metrics: dict, detailed_sleep: dict):
+def save_daily_metrics(date: str, metrics: dict, detailed_sleep: dict, detailed_workouts: list = None):
     """Save extracted metrics for a day."""
     metrics_file = METRICS_DIR / f"{date}.json"
     data = {
         "date": date,
         "summary": metrics,
-        "detailed_sleep": detailed_sleep
+        "detailed_sleep": detailed_sleep,
+        "detailed_workouts": detailed_workouts or []
     }
     with open(metrics_file, 'w') as f:
         json.dump(data, f, indent=2)
@@ -615,6 +743,7 @@ def generate_brief_with_claude(
     today: str,
     metrics: dict,
     detailed_sleep: dict,
+    detailed_workouts: list,
     baselines: dict,
     historical_metrics: list,
     historical_interventions: dict,
@@ -645,6 +774,27 @@ Key observations from the data:
 - Phase transitions (sleep fragmentation indicator): {detailed_sleep.get('phase_transitions', 'N/A')}
 
 ═══════════════════════════════════════════════════════════════════════════════
+YESTERDAY'S WORKOUTS
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+
+    if detailed_workouts:
+        user_prompt += f"```json\n{json.dumps(detailed_workouts, indent=2)}\n```\n\n"
+        total_mins = sum(w.get('duration_minutes', 0) for w in detailed_workouts)
+        total_cals = sum(w.get('calories', 0) or 0 for w in detailed_workouts)
+        activities = [w.get('activity') for w in detailed_workouts if w.get('activity')]
+        user_prompt += f"Summary: {len(detailed_workouts)} workout(s), {total_mins} total minutes, {total_cals} calories\n"
+        user_prompt += f"Activities: {', '.join(activities)}\n"
+        for i, w in enumerate(detailed_workouts, 1):
+            intensity = w.get('intensity', 'unknown')
+            label = f" ({w.get('label')})" if w.get('label') else ""
+            user_prompt += f"  {i}. {w.get('activity')}{label}: {w.get('duration_minutes')}min, {intensity} intensity, {w.get('calories') or 0} cal\n"
+    else:
+        user_prompt += "No workouts recorded yesterday.\n"
+
+    user_prompt += """
+═══════════════════════════════════════════════════════════════════════════════
 TODAY'S SUMMARY METRICS
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -672,7 +822,18 @@ HISTORICAL METRICS (last 28 days)
         for day_data in historical_metrics[:28]:  # Ensure max 28 days
             date = day_data.get('date', 'unknown')
             summary = day_data.get('summary', {})
-            user_prompt += f"\n{date}: Sleep={summary.get('sleep_score', '-')}, Readiness={summary.get('readiness', '-')}, HRV={summary.get('hrv', '-')}, Deep={summary.get('deep_sleep_minutes', '-')}min, RHR={summary.get('resting_hr', '-')}"
+            # Core metrics
+            line = f"\n{date}: Sleep={summary.get('sleep_score', '-')}, Readiness={summary.get('readiness', '-')}, HRV={summary.get('hrv', '-')}, Deep={summary.get('deep_sleep_minutes', '-')}min, RHR={summary.get('resting_hr', '-')}"
+            # Stress/recovery if available
+            if summary.get('stress_high') is not None:
+                line += f", Stress={summary.get('stress_high')}min, Recovery={summary.get('recovery_high', '-')}min"
+            # Workout if available
+            if summary.get('workout_minutes'):
+                line += f", Workout={summary.get('workout_minutes')}min/{summary.get('workout_calories', '-')}cal"
+            # Daytime HR if available
+            if summary.get('daytime_hr_avg'):
+                line += f", DayHR={summary.get('daytime_hr_avg')}bpm"
+            user_prompt += line
     else:
         user_prompt += "No historical data available yet (building baseline)."
 
@@ -790,8 +951,12 @@ def morning_brief():
         detailed_sleep = extract_detailed_sleep(oura_data)
         print(f"Extracted detailed sleep data: {len(detailed_sleep)} fields")
 
+        # Extract detailed workout data for yesterday
+        detailed_workouts = extract_detailed_workouts(oura_data)
+        print(f"Extracted detailed workout data: {len(detailed_workouts)} workout(s)")
+
         # Save daily metrics (for historical tracking)
-        save_daily_metrics(today, metrics, detailed_sleep)
+        save_daily_metrics(today, metrics, detailed_sleep, detailed_workouts)
 
         # Load baselines (60-day aggregates)
         baselines = load_baselines()
@@ -810,6 +975,7 @@ def morning_brief():
             today,
             metrics,
             detailed_sleep,
+            detailed_workouts,
             baselines,
             historical_metrics,
             historical_interventions,
@@ -910,16 +1076,25 @@ def reset_baselines():
         "data_points": 0,
         "window_days": BASELINE_WINDOW_DAYS,
         "metrics": {
+            # Sleep metrics
             "sleep_score": {"mean": 75, "std": 10, "values": []},
             "hrv": {"mean": 45, "std": 10, "values": []},
             "deep_sleep_minutes": {"mean": 70, "std": 15, "values": []},
             "light_sleep_minutes": {"mean": 200, "std": 30, "values": []},
             "rem_sleep_minutes": {"mean": 90, "std": 20, "values": []},
-            "readiness": {"mean": 75, "std": 10, "values": []},
-            "resting_hr": {"mean": 55, "std": 5, "values": []},
             "sleep_efficiency": {"mean": 85, "std": 5, "values": []},
             "latency_minutes": {"mean": 15, "std": 10, "values": []},
             "total_sleep_minutes": {"mean": 420, "std": 45, "values": []},
+            # Vitals
+            "resting_hr": {"mean": 55, "std": 5, "values": []},
+            "daytime_hr_avg": {"mean": 70, "std": 8, "values": []},
+            # Recovery
+            "readiness": {"mean": 75, "std": 10, "values": []},
+            "stress_high": {"mean": 60, "std": 30, "values": []},
+            "recovery_high": {"mean": 120, "std": 45, "values": []},
+            # Activity
+            "workout_minutes": {"mean": 30, "std": 20, "values": []},
+            "workout_calories": {"mean": 200, "std": 150, "values": []},
         }
     }
 
@@ -1054,8 +1229,53 @@ def backfill_history(days: int = 90):
     except Exception as e:
         print(f"   Error: {e}")
 
+    # Fetch daily_stress
+    all_daily_stress = {}
+    print("4. Fetching daily_stress...")
+    try:
+        result = fetch_oura_data(oura_token, "daily_stress", start_date, end_date)
+        for item in result.get("data", []):
+            day = item.get("day")
+            if day:
+                all_daily_stress[day] = item
+        print(f"   Got {len(all_daily_stress)} days")
+    except Exception as e:
+        print(f"   Error (stress may not be available): {e}")
+
+    # Fetch workouts
+    all_workouts = {}
+    print("5. Fetching workouts...")
+    try:
+        result = fetch_oura_data(oura_token, "workout", start_date, end_date)
+        for item in result.get("data", []):
+            day = item.get("day")
+            if day:
+                if day not in all_workouts:
+                    all_workouts[day] = []
+                all_workouts[day].append(item)
+        print(f"   Got workouts for {len(all_workouts)} days")
+    except Exception as e:
+        print(f"   Error: {e}")
+
+    # Fetch daytime heart rate (per-day queries, can be slow)
+    all_daytime_hr = {}
+    print("6. Fetching daytime heart rate (this may take a while)...")
+    hr_success_count = 0
+    for i in range(min(days, RAW_WINDOW_DAYS)):  # Only fetch HR for recent days to save time
+        date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        try:
+            readings = get_oura_heartrate(oura_token, date)
+            if readings:
+                all_daytime_hr[date] = readings
+                hr_success_count += 1
+        except Exception:
+            pass  # Silent fail for individual days
+        if i > 0 and i % 7 == 0:
+            print(f"   Processed {i}/{min(days, RAW_WINDOW_DAYS)} days...")
+    print(f"   Got heart rate data for {hr_success_count} days")
+
     # Process each day and extract metrics
-    print("\n4. Processing daily metrics...")
+    print("\n7. Processing daily metrics...")
     all_metrics = {}
 
     for i in range(days):
@@ -1066,6 +1286,9 @@ def backfill_history(days: int = 90):
             "daily_sleep": [all_daily_sleep[date]] if date in all_daily_sleep else [],
             "daily_readiness": [all_daily_readiness[date]] if date in all_daily_readiness else [],
             "sleep": [all_sleep[date]] if date in all_sleep else [],
+            "daily_stress": [all_daily_stress[date]] if date in all_daily_stress else [],
+            "workouts": all_workouts.get(date, []),
+            "daytime_hr": all_daytime_hr.get(date, []),
         }
 
         # Extract metrics
@@ -1077,12 +1300,13 @@ def backfill_history(days: int = 90):
             # Save to metrics file if within 28-day window
             if i < RAW_WINDOW_DAYS:
                 detailed_sleep = extract_detailed_sleep(oura_data)
-                save_daily_metrics(date, metrics, detailed_sleep)
+                detailed_workouts = extract_detailed_workouts(oura_data)
+                save_daily_metrics(date, metrics, detailed_sleep, detailed_workouts)
 
     print(f"   Extracted metrics for {len(all_metrics)} days")
 
     # Build baselines from all historical data
-    print("\n5. Building baselines...")
+    print("\n8. Building baselines...")
 
     # Sort dates oldest first
     sorted_dates = sorted(all_metrics.keys())
@@ -1094,16 +1318,25 @@ def backfill_history(days: int = 90):
         "data_points": 0,
         "window_days": BASELINE_WINDOW_DAYS,
         "metrics": {
+            # Sleep metrics
             "sleep_score": {"mean": 0, "std": 0, "values": []},
             "hrv": {"mean": 0, "std": 0, "values": []},
             "deep_sleep_minutes": {"mean": 0, "std": 0, "values": []},
             "light_sleep_minutes": {"mean": 0, "std": 0, "values": []},
             "rem_sleep_minutes": {"mean": 0, "std": 0, "values": []},
-            "readiness": {"mean": 0, "std": 0, "values": []},
-            "resting_hr": {"mean": 0, "std": 0, "values": []},
             "sleep_efficiency": {"mean": 0, "std": 0, "values": []},
             "latency_minutes": {"mean": 0, "std": 0, "values": []},
             "total_sleep_minutes": {"mean": 0, "std": 0, "values": []},
+            # Vitals
+            "resting_hr": {"mean": 0, "std": 0, "values": []},
+            "daytime_hr_avg": {"mean": 0, "std": 0, "values": []},
+            # Recovery
+            "readiness": {"mean": 0, "std": 0, "values": []},
+            "stress_high": {"mean": 0, "std": 0, "values": []},
+            "recovery_high": {"mean": 0, "std": 0, "values": []},
+            # Activity
+            "workout_minutes": {"mean": 0, "std": 0, "values": []},
+            "workout_calories": {"mean": 0, "std": 0, "values": []},
         }
     }
 
@@ -1139,7 +1372,7 @@ def backfill_history(days: int = 90):
     with open(BASELINES_FILE, 'w') as f:
         json.dump(baselines, f, indent=2)
 
-    print(f"\n6. Baselines saved with {baselines['data_points']} data points")
+    print(f"\n9. Baselines saved with {baselines['data_points']} data points")
     print("\nBaseline summary:")
     for metric, data in baselines["metrics"].items():
         if data["values"]:
@@ -1216,7 +1449,11 @@ def save_intervention_raw(raw_text: str, cleaned_text: str = None) -> dict:
     ensure_directories()
 
     # Reload volume to see latest commits from other containers
-    volume.reload()
+    # This only works when running inside Modal, skip for local testing
+    try:
+        volume.reload()
+    except RuntimeError:
+        pass  # Running locally, not in Modal
 
     # Migrate legacy .json to .jsonl if needed (before first write)
     _migrate_json_to_jsonl(today)

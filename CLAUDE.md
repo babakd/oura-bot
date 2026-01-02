@@ -178,11 +178,62 @@ modal run modal_agent.py::view_history --days 7
 Base URL: `https://api.ouraring.com/v2/usercollection`
 Auth: `Authorization: Bearer {OURA_ACCESS_TOKEN}`
 
+### Currently Used Endpoints
+
 | Endpoint | Data | Date Convention |
 |----------|------|-----------------|
 | `daily_sleep` | Sleep score, contributors | Day you woke up |
 | `daily_readiness` | Readiness score, temp deviation | Day you woke up |
 | `daily_activity` | Activity score, steps | Calendar day |
 | `sleep` | Detailed sleep data (HR, HRV, stages) | Day sleep STARTED |
+| `daily_stress` | Stress/recovery minutes, day summary | Calendar day |
+| `heartrate` | 5-min interval HR readings | Datetime range |
+| `workout` | Workout activities, calories, duration | Calendar day |
 
 **Important**: The `sleep` endpoint uses the date sleep started, not ended. To get last night's sleep for a morning brief on Jan 1, fetch sleep data for Dec 31-Jan 1 and find the session that ended on Jan 1.
+
+### Stress, Heart Rate & Workout Metrics
+
+#### daily_stress
+| Field | Type | Description |
+|-------|------|-------------|
+| `stress_high` | int | Minutes in high stress state |
+| `recovery_high` | int | Minutes in high recovery state |
+| `day_summary` | string | "restored", "normal", "stressed" |
+
+#### heartrate (aggregated to daily metrics)
+| Field | Type | Description |
+|-------|------|-------------|
+| `daytime_hr_avg` | float | Average HR during waking hours (source != "sleep") |
+| `daytime_hr_min` | int | Lowest daytime HR |
+| `daytime_hr_max` | int | Highest daytime HR |
+| `daytime_hr_samples` | int | Number of 5-min readings |
+
+#### workout
+| Field | Type | Description |
+|-------|------|-------------|
+| `workout_count` | int | Number of workouts that day |
+| `workout_calories` | int | Total calories burned |
+| `workout_minutes` | int | Total workout duration |
+| `workout_activities` | list | Activity types (cycling, running, etc.) |
+
+### Baseline Metrics
+
+All metrics tracked in baselines with 60-day rolling mean ± std:
+
+**Sleep**: sleep_score, hrv, deep_sleep_minutes, light_sleep_minutes, rem_sleep_minutes, total_sleep_minutes, sleep_efficiency, latency_minutes
+
+**Vitals**: resting_hr, daytime_hr_avg
+
+**Recovery**: readiness, stress_high, recovery_high
+
+**Activity**: workout_minutes, workout_calories
+
+### Analysis Guidelines for New Metrics
+
+| Metric | Suggested Concern Level | Notes |
+|--------|------------------------|-------|
+| stress_high >180 min | High stress day | Correlate with next night's sleep |
+| recovery_high <60 min | Low recovery | May indicate overtraining |
+| daytime_hr_avg >10 bpm above baseline | Elevated | Stress, illness, or dehydration |
+| workout context | Training load | Consider when interpreting readiness |
