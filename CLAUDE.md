@@ -1,5 +1,14 @@
 # Oura Daily Optimization Agent
 
+## IMPORTANT: Do Not Run Destructive Commands in Production
+
+**NEVER run `/clear`, `reset_baselines`, or any destructive commands against the production webhook or Modal volume.** The user's actual health data is stored there.
+
+When testing:
+- Use local pytest tests (they use temp directories)
+- Do NOT call the production webhook with `/clear`
+- Do NOT delete files from the Modal volume
+
 ## Project Overview
 
 A personal health optimization agent that:
@@ -7,14 +16,14 @@ A personal health optimization agent that:
 2. Analyzes sleep, readiness, HRV against personal baselines
 3. Generates actionable recommendations using Claude Opus 4.5
 4. Sends morning brief via Telegram
-5. Accepts intervention logging via Telegram replies
+5. Accepts intervention logging via Telegram replies (natural language)
 6. Tracks interventions and correlates with outcomes over time
 
 ## Tech Stack
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| AI Model | Claude Opus 4.5 (`claude-opus-4-5-20251101`) | Analysis, recommendations, and natural language parsing |
+| AI Model | Claude Opus 4.5 (`claude-opus-4-5-20251101`) | Analysis & recommendations |
 | Hosting | Modal (serverless) | Daily cron execution |
 | Data Source | Oura Ring API | Biometric data |
 | Notifications | Telegram Bot API | Morning briefs + intervention logging |
@@ -92,28 +101,67 @@ Claude Opus 4.5 receives verbose context and makes dynamic, context-aware decisi
 
 ## Intervention Tracking
 
-### Supported Types
+### How It Works
 
-| Type | Examples |
-|------|----------|
-| supplement | magnesium, apigenin, ashwagandha, melatonin, vitamin D, zinc, glycine, omega-3 |
-| behavior | sauna, cold plunge, meditation, exercise, workout, nap, walk, stretching |
-| environment | room temp, light exposure, caffeine cutoff |
-| consumption | alcohol, late meal, caffeine, coffee |
+1. **User logs intervention** via Telegram (natural language)
+2. **Raw text is stored immediately** with timestamp
+3. **Claude parses during daily brief** and saves structured data back
+4. **Future agents can use parsed data** for correlation analysis
+
+### Intervention File Format
+
+```json
+{
+  "date": "2026-01-01",
+  "entries": [
+    {
+      "time": "19:30",
+      "raw": "took two neuro-mag capsules and one omega3",
+      "parsed": [
+        {"type": "supplement", "name": "magnesium", "brand": "neuro-mag", "quantity": 2, "form": "capsule"},
+        {"type": "supplement", "name": "omega-3", "quantity": 1, "form": "capsule"}
+      ]
+    },
+    {
+      "time": "21:15",
+      "raw": "20 min sauna",
+      "parsed": null
+    }
+  ]
+}
+```
+
+- `raw`: Original user input (always preserved)
+- `parsed`: null until Claude processes during daily brief, then array of structured items
+
+### Parsed Item Fields
+
+| Field | Required | Examples |
+|-------|----------|----------|
+| type | Yes | supplement, behavior, consumption, environment |
+| name | Yes | magnesium, sauna, alcohol, room_temp |
+| quantity | No | 2, 400, 1 |
+| unit | No | mg, min, drinks, °F |
+| brand | No | neuro-mag, thorne |
+| form | No | capsule, powder, liquid |
+| duration | No | 20 min |
+| details | No | Any additional context |
 
 ### Telegram Bot Commands
 
 ```
-/status  - Show today's interventions
-/brief   - Show the latest morning brief
-/help    - Show available commands
+/log <text>  - Log an intervention (or just type naturally)
+/status      - Show today's interventions
+/brief       - Show the latest morning brief
+/clear       - Clear today's interventions
+/help        - Show available commands
 ```
 
-Or just message naturally:
+Or just message naturally (no command needed):
 ```
-just had 2 magnesium capsules
+took 2 magnesium capsules
 20 min sauna session
-had a glass of wine with dinner
+glass of wine with dinner
 ```
 
 ## CLI Commands
