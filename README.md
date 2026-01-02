@@ -68,8 +68,11 @@ modal secret create oura OURA_ACCESS_TOKEN=...
 
 modal secret create telegram \
     TELEGRAM_BOT_TOKEN=123456789:ABC... \
-    TELEGRAM_CHAT_ID=123456789
+    TELEGRAM_CHAT_ID=123456789 \
+    TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32)
 ```
+
+> **Note**: The webhook secret is used to authenticate incoming requests from Telegram. Save it somewhere—you'll need it when setting up the webhook.
 
 ### 6. Deploy
 
@@ -83,12 +86,18 @@ modal run modal_agent.py
 
 ### 7. Setup Telegram Webhook (for intervention logging)
 
-After deploying, set up the webhook so your bot can receive messages:
+After deploying, set up the webhook so your bot can receive messages. Include the webhook secret for security:
 
 ```bash
-# Get your webhook URL from Modal dashboard, then:
-curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://YOUR_MODAL_USERNAME--oura-agent-telegram-webhook.modal.run"
+curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://YOUR_MODAL_USERNAME--oura-agent-telegram-webhook.modal.run",
+    "secret_token": "<YOUR_WEBHOOK_SECRET>"
+  }'
 ```
+
+> **Important**: The `secret_token` must match the `TELEGRAM_WEBHOOK_SECRET` you created in step 5. This prevents unauthorized requests to your webhook.
 
 ## Usage
 
@@ -181,10 +190,12 @@ Oura data syncs when you open the app. Make sure to open the Oura app before the
 3. Check Modal logs: `modal app logs oura-agent`
 
 ### "Webhook not working"
-Verify the webhook is set:
-```bash
-curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
-```
+1. Verify the webhook is set:
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
+   ```
+2. Check that your `secret_token` in the webhook matches `TELEGRAM_WEBHOOK_SECRET` in Modal secrets
+3. Check Modal logs for 401 errors: `modal app logs oura-agent`
 
 ## License
 

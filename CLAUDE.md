@@ -39,7 +39,7 @@ A personal health optimization agent that:
 | Extracted metrics | 28 days | Summary metrics for historical context |
 | Interventions | 28 days | Correlation with outcomes |
 | Briefs | 28 days | Continuity and reference |
-| Baselines | 60-day rolling | "Normal" reference |
+| Baselines | 60-day rolling | Rolling average of recent 60 days (includes recent data) |
 
 ### Directory Structure
 
@@ -61,7 +61,7 @@ oura_agent/                      # Git repository
 ├── briefs/                      # Generated morning briefs (28 days)
 │   └── YYYY-MM-DD.md
 └── interventions/               # Logged interventions (28 days)
-    └── YYYY-MM-DD.json
+    └── YYYY-MM-DD.jsonl         # JSONL format (one entry per line)
 ```
 
 ## Credentials
@@ -70,7 +70,22 @@ oura_agent/                      # Git repository
 |-------------|-----------|--------|
 | `anthropic` | `ANTHROPIC_API_KEY` | console.anthropic.com |
 | `oura` | `OURA_ACCESS_TOKEN` | cloud.ouraring.com → Personal Access Tokens |
-| `telegram` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | @BotFather, getUpdates API |
+| `telegram` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET` | @BotFather, getUpdates API, generate random string |
+
+### Webhook Security
+
+The `TELEGRAM_WEBHOOK_SECRET` is used to authenticate incoming webhook requests. When setting up the webhook with Telegram, include this secret:
+
+```bash
+curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "<YOUR_MODAL_WEBHOOK_URL>",
+    "secret_token": "<YOUR_WEBHOOK_SECRET>"
+  }'
+```
+
+Telegram will send this token in the `X-Telegram-Bot-Api-Secret-Token` header with every request. The webhook validates this header and rejects requests with invalid or missing tokens (when the secret is configured).
 
 ## Schedule
 
@@ -84,9 +99,11 @@ Claude Opus 4.5 receives verbose context and makes dynamic, context-aware decisi
 
 1. **Last night's detailed sleep** - 41 fields including HR/HRV trends, sleep architecture, readiness contributors
 2. **28 days of historical metrics** - Daily summary for trend analysis
-3. **28 days of interventions** - For correlation analysis
+3. **28 days of interventions** - Cleaned/normalized text for correlation analysis
 4. **60-day baselines** - Mean ± std for each metric
 5. **Last 3 briefs** - For continuity
+
+Note: Baselines are a rolling 60-day average that includes recent data. They represent "your typical values" rather than a pre-intervention baseline. Compare today's metrics to baselines to see if you're above/below your personal norm.
 
 ### Example Guardrails (Reference, Not Absolutes)
 
@@ -104,48 +121,21 @@ Claude Opus 4.5 receives verbose context and makes dynamic, context-aware decisi
 ### How It Works
 
 1. **User logs intervention** via Telegram (natural language)
-2. **Raw text is stored immediately** with timestamp
-3. **Claude parses during daily brief** and saves structured data back
-4. **Future agents can use parsed data** for correlation analysis
+2. **Claude cleans/normalizes the input** immediately
+3. **Both raw and cleaned versions are stored**
+4. **Future agents see the cleaned version** for correlation analysis
 
 ### Intervention File Format
 
-```json
-{
-  "date": "2026-01-01",
-  "entries": [
-    {
-      "time": "19:30",
-      "raw": "took two neuro-mag capsules and one omega3",
-      "parsed": [
-        {"type": "supplement", "name": "magnesium", "brand": "neuro-mag", "quantity": 2, "form": "capsule"},
-        {"type": "supplement", "name": "omega-3", "quantity": 1, "form": "capsule"}
-      ]
-    },
-    {
-      "time": "21:15",
-      "raw": "20 min sauna",
-      "parsed": null
-    }
-  ]
-}
+Uses JSONL (JSON Lines) format for atomic appends. Each line is a single entry:
+
+```jsonl
+{"time": "19:30", "raw": "took two neuro-mag capsules and one omega3", "cleaned": "Neuro-mag 2 capsules, omega-3 1 capsule"}
+{"time": "21:15", "raw": "20 min sauna", "cleaned": "Sauna 20 min"}
 ```
 
-- `raw`: Original user input (always preserved)
-- `parsed`: null until Claude processes during daily brief, then array of structured items
-
-### Parsed Item Fields
-
-| Field | Required | Examples |
-|-------|----------|----------|
-| type | Yes | supplement, behavior, consumption, environment |
-| name | Yes | magnesium, sauna, alcohol, room_temp |
-| quantity | No | 2, 400, 1 |
-| unit | No | mg, min, drinks, °F |
-| brand | No | neuro-mag, thorne |
-| form | No | capsule, powder, liquid |
-| duration | No | 20 min |
-| details | No | Any additional context |
+- `raw`: Original user input (kept for audit, not displayed)
+- `cleaned`: Claude-normalized version (used for display and analysis)
 
 ### Telegram Bot Commands
 
