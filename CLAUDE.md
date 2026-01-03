@@ -49,6 +49,9 @@ A personal health optimization agent that:
 ```
 oura_agent/                      # Git repository
 ├── modal_agent.py               # Main Modal function + agent logic
+├── prompts/                     # System prompts (loaded at runtime)
+│   ├── morning_brief.md         # Morning brief generation prompt
+│   └── chat.md                  # Chat/intervention handling prompt
 ├── CLAUDE.md                    # This file - project context
 ├── profile.example.json         # User preferences template
 ├── requirements.txt             # Python dependencies
@@ -183,18 +186,44 @@ Chat includes:
 
 ### Intent Classification
 
-Messages are classified as INTERVENTION or QUESTION:
-- **Clear questions**: Contains `?`, starts with how/what/why/when/etc.
-- **Clear interventions**: Short, action-oriented, contains took/had/did/just/etc.
-- **Ambiguous**: Claude Haiku classifies (fast, ~$0.0001/call)
+Messages are classified as INTERVENTION or QUESTION by Claude Opus 4.5:
+- Claude analyzes the message context and responds with `[LOG: ...]` prefix for interventions
+- Questions receive direct answers without the LOG prefix
+- All classification happens within the main response (no separate classifier call)
 
-## CLI Commands
+## Deployment
+
+### How Modal Deployment Works
+
+Modal uploads files to run in the cloud. The `modal_agent.py` file configures what gets uploaded:
+
+```python
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(...)
+    .add_local_dir("prompts", "/root/prompts")  # IMPORTANT: includes prompts/
+)
+```
+
+**Key points:**
+- `modal deploy modal_agent.py` uploads the main file automatically
+- The `prompts/` directory is copied into the image via `.add_local_dir()`
+- Prompts are available at `/root/prompts/` on Modal containers
+- The `_get_prompts_dir()` function handles path resolution for both local and Modal
+
+### If You Add New Files
+
+If you add new directories that need to be deployed:
+1. Add `.add_local_dir("dirname", "/root/dirname")` to the image definition
+2. Update any path resolution to check both `/root/dirname` and local paths
+
+### CLI Commands
 
 ```bash
-# Deploy to Modal
+# Deploy to Modal (run from oura_agent/ directory)
 modal deploy modal_agent.py
 
-# Run manually
+# Run manually (triggers morning brief)
 modal run modal_agent.py
 
 # Backfill historical data (run once to bootstrap baselines)
@@ -205,6 +234,9 @@ modal run modal_agent.py::reset_baselines
 
 # View history
 modal run modal_agent.py::view_history --days 7
+
+# Check logs
+modal app logs oura-agent
 ```
 
 ## Oura API Reference
