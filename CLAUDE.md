@@ -25,6 +25,7 @@ A personal health optimization agent that:
 | Component | Technology | Purpose |
 |-----------|------------|---------|
 | AI Model | Claude Opus 4.5 (`claude-opus-4-5-20251101`) | Analysis & recommendations |
+| Extended Thinking | 10k token budget | Deep reasoning for morning briefs |
 | Hosting | Modal (serverless) | Daily cron execution |
 | Data Source | Oura Ring API | Biometric data |
 | Notifications | Telegram Bot API | Morning briefs + intervention logging |
@@ -59,7 +60,7 @@ oura_agent/                      # Git repository
 ├── raw/                         # Raw Oura API responses (28 days)
 │   └── YYYY-MM-DD.json
 ├── metrics/                     # Extracted daily metrics (28 days)
-│   └── YYYY-MM-DD.json
+│   └── YYYY-MM-DD.json          # Sleep data for wake-date, activity for calendar date
 ├── briefs/                      # Generated morning briefs (28 days)
 │   └── YYYY-MM-DD.md
 ├── interventions/               # Logged interventions (28 days)
@@ -174,7 +175,8 @@ Should I take it easy today?
 ```
 
 Chat includes:
-- Full 28-day metrics history
+- **Current date** (so Claude can resolve "yesterday", "last week", etc.)
+- Full 28-day metrics history (with activity: workouts, stress, daytime HR)
 - 60-day baselines for comparison
 - Today's logged interventions
 - Last 10 conversation messages for context
@@ -222,7 +224,9 @@ Auth: `Authorization: Bearer {OURA_ACCESS_TOKEN}`
 | `heartrate` | 5-min interval HR readings | Datetime range |
 | `workout` | Workout activities, calories, duration | Calendar day |
 
-**Important**: The `sleep` endpoint uses the date sleep started, not ended. To get last night's sleep for a morning brief on Jan 1, fetch sleep data for Dec 31-Jan 1 and find the session that ended on Jan 1.
+**Important Date Conventions**:
+- The `sleep` endpoint uses the date sleep started, not ended. To get last night's sleep for a morning brief on Jan 1, fetch sleep data for Dec 31-Jan 1 and find the session that ended on Jan 1.
+- **Oura API `end_date` is EXCLUSIVE**. To get data for Jan 1, use `end_date=2026-01-02`. This applies to all endpoints.
 
 ### Stress, Heart Rate & Workout Metrics
 
