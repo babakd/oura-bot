@@ -85,19 +85,21 @@ class TestUpdateBaselines:
         assert updated["metrics"]["sleep_score"]["values"] == [80, 70]
         assert updated["metrics"]["sleep_score"]["mean"] == 75.0  # (80+70)/2
 
-    def test_update_baselines_deduplicates(self, mock_now_nyc, sample_baselines):
-        """Test that adding same date twice doesn't duplicate."""
+    def test_update_baselines_replaces_same_date(self, mock_now_nyc, sample_baselines):
+        """Test that updating same date replaces old values (allows corrections)."""
         # sample_baselines has 14 dates ending at 2026-01-14
         existing_date = "2026-01-14"
         original_count = len(sample_baselines["dates"])
+        old_value = sample_baselines["metrics"]["sleep_score"]["values"][-1]
 
         new_metrics = {"sleep_score": 99}
         updated = modal_agent.update_baselines(sample_baselines, new_metrics, existing_date)
 
-        # Should not add duplicate date
+        # Should not add duplicate date (same count)
         assert len(updated["dates"]) == original_count
-        # Values should not change
-        assert 99 not in updated["metrics"]["sleep_score"]["values"]
+        # Old value should be replaced with new value
+        assert 99 in updated["metrics"]["sleep_score"]["values"]
+        assert old_value not in updated["metrics"]["sleep_score"]["values"] or old_value == 99
 
     def test_update_baselines_respects_window(self, mock_now_nyc):
         """Test that baselines respect the window size limit."""

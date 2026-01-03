@@ -164,20 +164,33 @@ def fetch_oura_data(token: str, endpoint: str, start_date: str, end_date: str = 
     return response.json()
 
 
-def get_oura_daily_data(token: str, date: str) -> dict:
+def get_oura_daily_data(token: str, date: str, context_date: str = None) -> dict:
     """
     Fetch all relevant Oura data for a given date.
 
     Note on Oura date conventions:
-    - daily_sleep, daily_readiness: 'day' = the morning you woke up
+    - daily_sleep, daily_readiness: 'day' = the morning you woke up (wake-date)
+    - daily_activity, daily_stress, workout: 'day' = calendar day (context-date)
     - sleep (detailed): 'day' = the night sleep started
 
-    So for a brief on Jan 1, we want:
+    Args:
+        token: Oura API access token
+        date: The wake-date (date you woke up) for sleep/readiness data
+        context_date: The calendar date for activity/stress/workout (defaults to date if not specified)
+                     For morning briefs, this should typically be yesterday (complete day data)
+
+    So for a brief on Jan 1 at 10 AM, we want:
     - daily_sleep for Jan 1 (reflects Dec 31 night → Jan 1 morning)
     - daily_readiness for Jan 1
     - sleep session that ended on Jan 1 (started Dec 31)
+    - daily_activity for Dec 31 (yesterday - complete day)
+    - daily_stress for Dec 31 (yesterday - complete day)
+    - workouts for Dec 31 (yesterday - complete day)
     """
     data = {}
+
+    # Use context_date for activity/stress/workout if provided, otherwise use date
+    activity_date = context_date if context_date else date
 
     # Calculate date range for sleep endpoint
     # We need day_before AND day_after because:
@@ -188,8 +201,8 @@ def get_oura_daily_data(token: str, date: str) -> dict:
     day_before = (target - timedelta(days=1)).strftime("%Y-%m-%d")
     day_after = (target + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Daily endpoints - fetch for the target date
-    for endpoint in ["daily_sleep", "daily_readiness", "daily_activity", "daily_stress"]:
+    # Wake-date endpoints - fetch for the target date (sleep/readiness)
+    for endpoint in ["daily_sleep", "daily_readiness"]:
         try:
             result = fetch_oura_data(token, endpoint, date, date)
             data[endpoint] = result.get("data", [])
@@ -197,9 +210,18 @@ def get_oura_daily_data(token: str, date: str) -> dict:
             print(f"Warning: Failed to fetch {endpoint}: {e}")
             data[endpoint] = []
 
-    # Workouts - can have multiple per day
+    # Calendar-day endpoints - fetch for activity_date (complete day data)
+    for endpoint in ["daily_activity", "daily_stress"]:
+        try:
+            result = fetch_oura_data(token, endpoint, activity_date, activity_date)
+            data[endpoint] = result.get("data", [])
+        except Exception as e:
+            print(f"Warning: Failed to fetch {endpoint}: {e}")
+            data[endpoint] = []
+
+    # Workouts - fetch for activity_date (complete day data)
     try:
-        result = fetch_oura_data(token, "workout", date, date)
+        result = fetch_oura_data(token, "workout", activity_date, activity_date)
         data["workouts"] = result.get("data", [])
     except Exception as e:
         print(f"Warning: Failed to fetch workouts: {e}")
@@ -481,13 +503,8 @@ def extract_detailed_workouts(oura_data: dict) -> list:
     return detailed_workouts
 
 
-def load_baselines() -> dict:
-    """Load existing baselines or return defaults."""
-    if BASELINES_FILE.exists():
-        with open(BASELINES_FILE) as f:
-            return json.load(f)
-
-    # Default baselines (population averages as starting point)
+def get_default_baselines() -> dict:
+    """Return default baselines with population averages."""
     return {
         "last_updated": None,
         "dates": [],
@@ -517,17 +534,58 @@ def load_baselines() -> dict:
     }
 
 
+def load_baselines() -> dict:
+    """
+    Load existing baselines, merging with defaults to handle schema changes.
+
+    This ensures new metrics added to defaults will be available even in
+    existing deployments with persisted baselines.
+    """
+    defaults = get_default_baselines()
+
+    if not BASELINES_FILE.exists():
+        return defaults
+
+    with open(BASELINES_FILE) as f:
+        persisted = json.load(f)
+
+    # Merge: ensure all default metrics exist in persisted baselines
+    # (new metrics get default values, existing metrics keep their data)
+    if "metrics" not in persisted:
+        persisted["metrics"] = {}
+
+    for metric, default_data in defaults["metrics"].items():
+        if metric not in persisted["metrics"]:
+            print(f"Adding new baseline metric: {metric}")
+            persisted["metrics"][metric] = default_data
+
+    return persisted
+
+
 def update_baselines(baselines: dict, new_metrics: dict, date: str, window: int = BASELINE_WINDOW_DAYS) -> dict:
-    """Update rolling baselines with new data. Deduplicates by date."""
+    """
+    Update rolling baselines with new data.
+
+    If the date already exists, replaces the old values (allows corrections).
+    """
     import statistics
 
-    # Track which dates we have data for to prevent duplicates
+    # Track which dates we have data for
     dates_seen = baselines.get("dates", [])
 
-    # If we already have data for this date, don't add again
+    # If date exists, remove old values before adding new ones (allows corrections)
     if date in dates_seen:
-        print(f"Baselines already contain data for {date}, skipping update")
-        return baselines
+        date_index = dates_seen.index(date)
+        print(f"Replacing baseline data for {date} (index {date_index})")
+
+        # Remove old value at this index for each metric
+        for metric in baselines["metrics"]:
+            values = baselines["metrics"][metric].get("values", [])
+            if len(values) > date_index:
+                values.pop(date_index)
+                baselines["metrics"][metric]["values"] = values
+
+        dates_seen.remove(date)
 
     # Add this date to our tracking
     dates_seen.append(date)
@@ -566,10 +624,13 @@ def load_interventions(date: str) -> dict:
     if jsonl_file.exists():
         entries = []
         with open(jsonl_file) as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if line:
-                    entries.append(json.loads(line))
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        print(f"Warning: Skipped corrupt line {line_num} in {jsonl_file}: {e}")
         return {"date": date, "entries": entries}
 
     # Fall back to JSON (legacy format)
@@ -930,9 +991,18 @@ def morning_brief():
     try:
         ensure_directories()
 
-        # Fetch Oura data for TODAY
-        print("Fetching Oura data...")
-        oura_data = get_oura_daily_data(oura_token, today)
+        # Calculate dates:
+        # - today: wake-date for sleep/readiness (data for the night that just ended)
+        # - yesterday: context-date for activity/stress/workout/HR (complete day data)
+        yesterday = (now_nyc() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Fetch Oura data: sleep/readiness for today, activity/stress/workout for yesterday
+        print(f"Fetching Oura data (wake-date={today}, context-date={yesterday})...")
+        oura_data = get_oura_daily_data(oura_token, today, context_date=yesterday)
+
+        # Fetch daytime HR for yesterday (complete day - at 10 AM today's HR is incomplete)
+        oura_data["daytime_hr"] = get_oura_heartrate(oura_token, yesterday)
+        print(f"Fetched {len(oura_data.get('daytime_hr', []))} daytime HR readings for {yesterday}")
 
         # Save raw data
         raw_file = RAW_DIR / f"{today}.json"
@@ -1070,33 +1140,7 @@ def reset_baselines():
     """Reset baselines to defaults. Use after polluted data."""
     ensure_directories()
 
-    baselines = {
-        "last_updated": None,
-        "dates": [],
-        "data_points": 0,
-        "window_days": BASELINE_WINDOW_DAYS,
-        "metrics": {
-            # Sleep metrics
-            "sleep_score": {"mean": 75, "std": 10, "values": []},
-            "hrv": {"mean": 45, "std": 10, "values": []},
-            "deep_sleep_minutes": {"mean": 70, "std": 15, "values": []},
-            "light_sleep_minutes": {"mean": 200, "std": 30, "values": []},
-            "rem_sleep_minutes": {"mean": 90, "std": 20, "values": []},
-            "sleep_efficiency": {"mean": 85, "std": 5, "values": []},
-            "latency_minutes": {"mean": 15, "std": 10, "values": []},
-            "total_sleep_minutes": {"mean": 420, "std": 45, "values": []},
-            # Vitals
-            "resting_hr": {"mean": 55, "std": 5, "values": []},
-            "daytime_hr_avg": {"mean": 70, "std": 8, "values": []},
-            # Recovery
-            "readiness": {"mean": 75, "std": 10, "values": []},
-            "stress_high": {"mean": 60, "std": 30, "values": []},
-            "recovery_high": {"mean": 120, "std": 45, "values": []},
-            # Activity
-            "workout_minutes": {"mean": 30, "std": 20, "values": []},
-            "workout_calories": {"mean": 200, "std": 150, "values": []},
-        }
-    }
+    baselines = get_default_baselines()
 
     with open(BASELINES_FILE, 'w') as f:
         json.dump(baselines, f, indent=2)
