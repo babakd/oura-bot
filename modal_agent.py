@@ -326,8 +326,10 @@ def get_oura_daily_data(token: str, date: str, context_date: str = None) -> dict
             data[endpoint] = []
 
     # Workouts - fetch for activity_date (complete day data)
+    # Note: Oura API end_date is EXCLUSIVE, so we need activity_date + 1 day
     try:
-        result = fetch_oura_data(token, "workout", activity_date, activity_date)
+        activity_end = (datetime.strptime(activity_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        result = fetch_oura_data(token, "workout", activity_date, activity_end)
         data["workouts"] = result.get("data", [])
     except Exception as e:
         print(f"Warning: Failed to fetch workouts: {e}")
@@ -350,6 +352,88 @@ def get_oura_daily_data(token: str, date: str, context_date: str = None) -> dict
     except Exception as e:
         print(f"Warning: Failed to fetch sleep: {e}")
         data["sleep"] = []
+
+    return data
+
+
+def get_oura_sleep_data(token: str, wake_date: str) -> dict:
+    """
+    Fetch sleep and readiness data for a given wake date.
+
+    Args:
+        token: Oura API access token
+        wake_date: The date you woke up (YYYY-MM-DD)
+
+    Returns:
+        Dict with keys: daily_sleep, daily_readiness, sleep (detailed)
+    """
+    data = {}
+
+    # Calculate date range for sleep endpoint
+    target = datetime.strptime(wake_date, "%Y-%m-%d")
+    day_before = (target - timedelta(days=1)).strftime("%Y-%m-%d")
+    day_after = (target + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Wake-date endpoints
+    for endpoint in ["daily_sleep", "daily_readiness"]:
+        try:
+            result = fetch_oura_data(token, endpoint, wake_date, wake_date)
+            data[endpoint] = result.get("data", [])
+        except Exception as e:
+            print(f"Warning: Failed to fetch {endpoint}: {e}")
+            data[endpoint] = []
+
+    # Sleep endpoint: fetch sessions that ended on wake_date
+    try:
+        result = fetch_oura_data(token, "sleep", day_before, day_after)
+        sleep_sessions = result.get("data", [])
+        for session in reversed(sleep_sessions):
+            bedtime_end = session.get("bedtime_end", "")
+            if wake_date in bedtime_end:
+                data["sleep"] = [session]
+                break
+        if "sleep" not in data:
+            data["sleep"] = sleep_sessions[-1:] if sleep_sessions else []
+    except Exception as e:
+        print(f"Warning: Failed to fetch sleep: {e}")
+        data["sleep"] = []
+
+    return data
+
+
+def get_oura_activity_data(token: str, activity_date: str) -> dict:
+    """
+    Fetch activity, stress, workouts, and heart rate for a calendar date.
+
+    Args:
+        token: Oura API access token
+        activity_date: The calendar date (YYYY-MM-DD)
+
+    Returns:
+        Dict with keys: daily_activity, daily_stress, workouts, daytime_hr
+    """
+    data = {}
+
+    # Calendar-day endpoints
+    for endpoint in ["daily_activity", "daily_stress"]:
+        try:
+            result = fetch_oura_data(token, endpoint, activity_date, activity_date)
+            data[endpoint] = result.get("data", [])
+        except Exception as e:
+            print(f"Warning: Failed to fetch {endpoint}: {e}")
+            data[endpoint] = []
+
+    # Workouts - Oura API end_date is EXCLUSIVE
+    try:
+        activity_end = (datetime.strptime(activity_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        result = fetch_oura_data(token, "workout", activity_date, activity_end)
+        data["workouts"] = result.get("data", [])
+    except Exception as e:
+        print(f"Warning: Failed to fetch workouts: {e}")
+        data["workouts"] = []
+
+    # Daytime heart rate
+    data["daytime_hr"] = get_oura_heartrate(token, activity_date)
 
     return data
 
@@ -468,6 +552,95 @@ def extract_metrics(oura_data: dict) -> dict:
         metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
 
     # Daytime heart rate (passed separately via daytime_hr key)
+    if oura_data.get("daytime_hr"):
+        readings = oura_data["daytime_hr"]
+        if readings:
+            bpms = [r["bpm"] for r in readings if r.get("bpm")]
+            if bpms:
+                metrics["daytime_hr_avg"] = round(sum(bpms) / len(bpms), 1)
+                metrics["daytime_hr_min"] = min(bpms)
+                metrics["daytime_hr_max"] = max(bpms)
+                metrics["daytime_hr_samples"] = len(bpms)
+
+    return metrics
+
+
+def extract_sleep_metrics(oura_data: dict) -> dict:
+    """Extract sleep-related metrics from Oura API response.
+
+    Includes: sleep_score, deep/light/rem/total sleep, efficiency, HRV, HR,
+    breath, latency, restless_periods, resting_hr, readiness, temperature_deviation.
+    """
+    metrics = {}
+
+    # Daily sleep
+    if oura_data.get("daily_sleep"):
+        sleep = oura_data["daily_sleep"][0]
+        metrics["sleep_score"] = sleep.get("score")
+
+    # Detailed sleep (for deep sleep, efficiency, HRV)
+    if oura_data.get("sleep"):
+        sleep_detail = oura_data["sleep"][0]
+        deep_sleep_sec = sleep_detail.get("deep_sleep_duration", 0)
+        light_sleep_sec = sleep_detail.get("light_sleep_duration", 0)
+        rem_sleep_sec = sleep_detail.get("rem_sleep_duration", 0)
+        total_sleep_sec = sleep_detail.get("total_sleep_duration", 0)
+
+        metrics["deep_sleep_minutes"] = deep_sleep_sec // 60 if deep_sleep_sec else None
+        metrics["light_sleep_minutes"] = light_sleep_sec // 60 if light_sleep_sec else None
+        metrics["rem_sleep_minutes"] = rem_sleep_sec // 60 if rem_sleep_sec else None
+        metrics["total_sleep_minutes"] = total_sleep_sec // 60 if total_sleep_sec else None
+        metrics["sleep_efficiency"] = sleep_detail.get("efficiency")
+        metrics["hrv"] = sleep_detail.get("average_hrv")
+        metrics["avg_hr"] = sleep_detail.get("average_heart_rate")
+        metrics["avg_breath"] = sleep_detail.get("average_breath")
+        metrics["latency_minutes"] = sleep_detail.get("latency", 0) // 60 if sleep_detail.get("latency") else None
+        metrics["restless_periods"] = sleep_detail.get("restless_periods")
+        metrics["resting_hr"] = sleep_detail.get("lowest_heart_rate")
+
+    # Readiness
+    if oura_data.get("daily_readiness"):
+        readiness = oura_data["daily_readiness"][0]
+        metrics["readiness"] = readiness.get("score")
+        metrics["temperature_deviation"] = readiness.get("temperature_deviation")
+
+    return metrics
+
+
+def extract_activity_metrics(oura_data: dict) -> dict:
+    """Extract activity-related metrics from Oura API response.
+
+    Includes: activity_score, steps, stress, recovery, workouts, daytime_hr.
+    """
+    metrics = {}
+
+    # Activity
+    if oura_data.get("daily_activity"):
+        activity = oura_data["daily_activity"][0]
+        metrics["activity_score"] = activity.get("score")
+        metrics["steps"] = activity.get("steps")
+
+    # Daily stress (API returns seconds, convert to minutes)
+    if oura_data.get("daily_stress"):
+        stress = oura_data["daily_stress"][0]
+        stress_sec = stress.get("stress_high")
+        recovery_sec = stress.get("recovery_high")
+        metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
+        metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
+        metrics["stress_day_summary"] = stress.get("day_summary")
+
+    # Workouts (aggregate if multiple)
+    if oura_data.get("workouts"):
+        workouts = oura_data["workouts"]
+        metrics["workout_count"] = len(workouts)
+        metrics["workout_calories"] = sum(w.get("calories", 0) or 0 for w in workouts)
+        metrics["workout_minutes"] = sum(
+            _workout_duration_minutes(w.get("start_datetime"), w.get("end_datetime"))
+            for w in workouts
+        )
+        metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
+
+    # Daytime heart rate
     if oura_data.get("daytime_hr"):
         readings = oura_data["daytime_hr"]
         if readings:
@@ -801,15 +974,65 @@ def load_historical_metrics(days: int = 28) -> list:
     return metrics_history
 
 
-def save_daily_metrics(date: str, metrics: dict, detailed_sleep: dict, detailed_workouts: list = None):
-    """Save extracted metrics for a day."""
+def save_daily_metrics(
+    date: str,
+    metrics: dict = None,
+    detailed_sleep: dict = None,
+    detailed_workouts: list = None,
+    merge: bool = False
+):
+    """Save extracted metrics for a day.
+
+    Args:
+        date: Date string (YYYY-MM-DD)
+        metrics: Summary metrics dict
+        detailed_sleep: Detailed sleep data dict
+        detailed_workouts: List of workout dicts
+        merge: If True, merge with existing file instead of overwriting
+    """
     metrics_file = METRICS_DIR / f"{date}.json"
-    data = {
-        "date": date,
-        "summary": metrics,
-        "detailed_sleep": detailed_sleep,
-        "detailed_workouts": detailed_workouts or []
-    }
+
+    # Load existing data if merging
+    existing_data = {}
+    if merge and metrics_file.exists():
+        try:
+            with open(metrics_file) as f:
+                existing_data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            existing_data = {}
+
+    # Build new data, merging with existing if requested
+    data = {"date": date}
+
+    # Handle summary metrics
+    if metrics is not None:
+        if merge and "summary" in existing_data:
+            merged_summary = existing_data.get("summary", {}).copy()
+            merged_summary.update(metrics)
+            data["summary"] = merged_summary
+        else:
+            data["summary"] = metrics
+    elif "summary" in existing_data:
+        data["summary"] = existing_data["summary"]
+    else:
+        data["summary"] = {}
+
+    # Handle detailed sleep
+    if detailed_sleep is not None:
+        data["detailed_sleep"] = detailed_sleep
+    elif "detailed_sleep" in existing_data:
+        data["detailed_sleep"] = existing_data["detailed_sleep"]
+    else:
+        data["detailed_sleep"] = {}
+
+    # Handle detailed workouts
+    if detailed_workouts is not None:
+        data["detailed_workouts"] = detailed_workouts
+    elif "detailed_workouts" in existing_data:
+        data["detailed_workouts"] = existing_data["detailed_workouts"]
+    else:
+        data["detailed_workouts"] = []
+
     with open(metrics_file, 'w') as f:
         json.dump(data, f, indent=2)
 
@@ -1056,14 +1279,22 @@ Be specific with numbers. Use status emojis: ✅ (normal), ⚠️ (notable devia
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2500,
+        max_tokens=16000,
+        thinking={
+            "type": "enabled",
+            "budget_tokens": 10000
+        },
         system=SYSTEM_PROMPT,
         messages=[
             {"role": "user", "content": user_prompt}
         ]
     )
 
-    return response.content[0].text
+    # Extract text content (skip thinking blocks)
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    return response.content[-1].text
 
 
 def generate_evening_brief_with_claude(
@@ -1223,40 +1454,48 @@ def morning_brief():
 
         # Calculate dates:
         # - today: wake-date for sleep/readiness (data for the night that just ended)
-        # - yesterday: context-date for activity/stress/workout/HR (complete day data)
+        # - yesterday: calendar date for activity/stress/workout/HR (complete day data)
         yesterday = (now_nyc() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # Fetch Oura data: sleep/readiness for today, activity/stress/workout for yesterday
-        print(f"Fetching Oura data (wake-date={today}, context-date={yesterday})...")
-        oura_data = get_oura_daily_data(oura_token, today, context_date=yesterday)
+        # === FETCH AND SAVE SLEEP DATA (today's file) ===
+        print(f"Fetching sleep data for {today} (wake-date)...")
+        sleep_data = get_oura_sleep_data(oura_token, today)
 
-        # Fetch daytime HR for yesterday (complete day - at 10 AM today's HR is incomplete)
-        oura_data["daytime_hr"] = get_oura_heartrate(oura_token, yesterday)
-        print(f"Fetched {len(oura_data.get('daytime_hr', []))} daytime HR readings for {yesterday}")
+        # Extract and save sleep metrics to today's file
+        sleep_metrics = extract_sleep_metrics(sleep_data)
+        detailed_sleep = extract_detailed_sleep(sleep_data)
+        print(f"Extracted sleep metrics: {len(sleep_metrics)} fields, detailed: {len(detailed_sleep)} fields")
 
-        # Save raw data
+        save_daily_metrics(today, sleep_metrics, detailed_sleep, None, merge=True)
+        print(f"Saved sleep data to metrics/{today}.json")
+
+        # === FETCH AND SAVE ACTIVITY DATA (yesterday's file) ===
+        print(f"Fetching activity data for {yesterday} (calendar date)...")
+        activity_data = get_oura_activity_data(oura_token, yesterday)
+
+        # Extract and save activity metrics to yesterday's file
+        activity_metrics = extract_activity_metrics(activity_data)
+        detailed_workouts = extract_detailed_workouts(activity_data)
+        print(f"Extracted activity metrics: {len(activity_metrics)} fields, workouts: {len(detailed_workouts)}")
+
+        save_daily_metrics(yesterday, activity_metrics, None, detailed_workouts, merge=True)
+        print(f"Saved activity data to metrics/{yesterday}.json")
+
+        # === SAVE RAW DATA (for debugging) ===
+        # Combine both for raw storage
+        oura_data = {**sleep_data, **activity_data}
         raw_file = RAW_DIR / f"{today}.json"
         with open(raw_file, 'w') as f:
             json.dump(oura_data, f, indent=2)
         print(f"Saved raw data to {raw_file}")
 
-        # Extract summary metrics
-        metrics = extract_metrics(oura_data)
-        print(f"Extracted metrics: {metrics}")
+        # === PREPARE COMBINED METRICS FOR BRIEF AND BASELINES ===
+        # Merge sleep + activity metrics for backward compatibility
+        metrics = {**sleep_metrics, **activity_metrics}
+        print(f"Combined metrics: {metrics}")
 
         if not metrics:
             raise ValueError("No metrics extracted from Oura data")
-
-        # Extract detailed sleep data for last night
-        detailed_sleep = extract_detailed_sleep(oura_data)
-        print(f"Extracted detailed sleep data: {len(detailed_sleep)} fields")
-
-        # Extract detailed workout data for yesterday
-        detailed_workouts = extract_detailed_workouts(oura_data)
-        print(f"Extracted detailed workout data: {len(detailed_workouts)} workout(s)")
-
-        # Save daily metrics (for historical tracking)
-        save_daily_metrics(today, metrics, detailed_sleep, detailed_workouts)
 
         # Load baselines (60-day aggregates)
         baselines = load_baselines()
@@ -1373,7 +1612,9 @@ def evening_brief():
             oura_data["daily_stress"] = []
 
         try:
-            workout_data = fetch_oura_data(oura_token, "workout", today, today)
+            # Note: Oura API end_date is EXCLUSIVE, so we need today + 1 day
+            tomorrow = (datetime.strptime(today, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            workout_data = fetch_oura_data(oura_token, "workout", today, tomorrow)
             oura_data["workouts"] = workout_data.get("data", [])
         except Exception as e:
             print(f"Warning: Could not fetch workout data: {e}")
@@ -1556,12 +1797,13 @@ def debug_workouts(date: str = None, days_back: int = 7):
     token = os.environ.get("OURA_ACCESS_TOKEN")
 
     # Calculate start date (days_back days ago)
+    # Note: Oura API end_date is EXCLUSIVE, so add 1 day to include today
     end_dt = now_nyc()
     start_dt = end_dt - timedelta(days=days_back)
     start_date = start_dt.strftime("%Y-%m-%d")
-    end_date = end_dt.strftime("%Y-%m-%d")
+    end_date = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    print(f"Fetching workouts from {start_date} to {end_date} from Oura API...")
+    print(f"Fetching workouts from {start_date} to {end_date} (exclusive) from Oura API...")
 
     url = f"{OURA_API_BASE}/workout"
     params = {"start_date": start_date, "end_date": end_date}
@@ -1636,10 +1878,11 @@ def backfill_history(days: int = 90):
     ensure_directories()
 
     # Calculate date range
+    # Note: Oura API end_date is EXCLUSIVE, so add 1 day to include today
     start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
-    end_date = today.strftime("%Y-%m-%d")
+    end_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    print(f"Fetching data from {start_date} to {end_date}")
+    print(f"Fetching data from {start_date} to {end_date} (exclusive)")
 
     # Fetch all data in batches (Oura API allows date ranges)
     all_daily_sleep = {}
@@ -2025,6 +2268,11 @@ def build_chat_context(baselines: dict, metrics: list, interventions: list, brie
     """Build context string for chat with health data."""
     lines = []
 
+    # Add current date anchor so Claude can resolve relative dates like "yesterday"
+    today = now_nyc().strftime("%Y-%m-%d")
+    lines.append(f"## Current Date: {today}")
+    lines.append("")
+
     # Baselines summary
     if baselines.get("metrics"):
         lines.append("## Your Baselines (60-day rolling averages)")
@@ -2038,15 +2286,34 @@ def build_chat_context(baselines: dict, metrics: list, interventions: list, brie
     # Recent metrics (last 7 days for chat, more concise than brief)
     if metrics:
         lines.append("## Recent Daily Metrics (last 7 days)")
-        for day_data in metrics[-7:]:
+        for day_data in metrics[:7]:
             date = day_data.get("date", "unknown")
             summary = day_data.get("summary", {})
+            # Sleep metrics
             sleep = summary.get("sleep_score", "N/A")
             hrv = summary.get("hrv", "N/A")
             readiness = summary.get("readiness", "N/A")
             deep = summary.get("deep_sleep_minutes", "N/A")
             rhr = summary.get("resting_hr", "N/A")
-            lines.append(f"- {date}: Sleep {sleep}, HRV {hrv}, Readiness {readiness}, Deep {deep}min, RHR {rhr}")
+            # Activity metrics
+            workout_mins = summary.get("workout_minutes")
+            workout_cals = summary.get("workout_calories")
+            workout_acts = summary.get("workout_activities", [])
+            stress = summary.get("stress_high")
+            recovery = summary.get("recovery_high")
+            day_hr = summary.get("daytime_hr_avg")
+
+            line = f"- {date}: Sleep {sleep}, HRV {hrv}, Readiness {readiness}, Deep {deep}min, RHR {rhr}"
+            if workout_mins:
+                acts_str = "/".join(workout_acts) if workout_acts else ""
+                line += f", Workout {workout_mins}min/{workout_cals:.0f}cal ({acts_str})" if workout_cals else f", Workout {workout_mins}min ({acts_str})"
+            if stress is not None:
+                line += f", Stress {stress}min"
+            if recovery is not None:
+                line += f", Recovery {recovery}min"
+            if day_hr:
+                line += f", DayHR {day_hr}bpm"
+            lines.append(line)
         lines.append("")
 
     # Today's interventions
@@ -2222,21 +2489,22 @@ def analyze_photo_with_claude(api_key: str, image_data: bytes, caption: str = ""
     # Convert to base64
     image_base64 = base64.b64encode(image_data).decode("utf-8")
 
-    caption_context = f'User caption: "{caption}"' if caption else ""
+    caption_context = f'\nUser caption: "{caption}"\n\nIMPORTANT: Include EVERYTHING mentioned in the caption, even if not visible in the image.' if caption else ""
 
-    prompt = f"""Analyze this image and extract any health-related intervention information.
+    prompt = f"""Extract health interventions from BOTH the image AND the user's caption.
 
-Look for:
+From the image, look for:
 - Supplements/vitamins (name, dosage, quantity)
 - Food/drinks (what it is, portion if visible)
 - Exercise equipment or activity
 - Wellness products (sauna, ice bath, etc.)
-
 {caption_context}
 
-Respond with ONLY a brief intervention log entry (under 10 words).
-If the image doesn't show a health intervention, respond with "NOT_AN_INTERVENTION".
-Examples: "Vitamin D 5000 IU", "Post-workout protein shake", "20 min sauna session"
+Respond with a normalized intervention log entry listing ALL items.
+If the caption mentions items not in the image, include them too.
+Keep under 30 words. Use comma-separated format for multiple items.
+If neither image nor caption shows a health intervention, respond with "NOT_AN_INTERVENTION".
+Examples: "Creatine 2 capsules, Neuro-Mag 1 capsule", "Post-workout protein shake", "20 min sauna session"
 """
 
     client = anthropic.Anthropic(api_key=api_key)
