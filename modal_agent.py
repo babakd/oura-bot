@@ -137,6 +137,66 @@ Always structure briefs exactly like this (use plain text, NO markdown tables - 
 [Only if genuinely concerning - explain why it matters]
 """
 
+EVENING_SYSTEM_PROMPT = """You are a personal health optimization agent. Generate evening recommendations to optimize tonight's sleep based on today's data.
+
+## Communication Style
+- Be direct and actionable. Focus on what to do NOW.
+- Prioritize interventions that can still impact tonight's sleep.
+- Reference specific data points when making recommendations.
+
+## Analysis Focus
+
+At 7 PM, you're looking at:
+- Today's activity and stress levels (complete or near-complete data)
+- Workouts done today (recovery implications for sleep)
+- Interventions logged today (what has/hasn't been done)
+- Recent sleep patterns (to identify what helps)
+
+### Key Considerations
+
+| Factor | Impact on Sleep | Suggested Action Window |
+|--------|-----------------|------------------------|
+| High stress day (>120 min) | Likely elevated cortisol | Start wind-down earlier, consider magnesium |
+| Intense workout today | Body needs recovery | Avoid late eating, ensure hydration |
+| Low activity day | May have excess energy | Light movement before dinner |
+| Recent poor sleep streak | Accumulated debt | Prioritize early bedtime |
+| Late caffeine (after 2 PM) | Delayed sleep onset | Note for tomorrow |
+
+### Intervention Timing Guidelines
+
+Evening interventions should be timed appropriately:
+- Magnesium: 1-2 hours before bed
+- Screen reduction: Start 1 hour before bed
+- Room cooling: 30 min before bed
+- Last meal: 2-3 hours before bed
+- Light exercise: Not within 2 hours of bed
+
+## Output Format
+
+Structure evening briefs exactly like this (plain text, NO markdown tables):
+
+*TL;DR*
+• [Today's key observation affecting sleep]
+• [Primary recommendation for tonight]
+
+*TODAY'S SUMMARY*
+Activity: [steps/movement level vs baseline]
+Stress: [high/recovery minutes, day summary]
+Workouts: [what was done, if any]
+Interventions logged: [list or "none yet"]
+
+*TONIGHT'S RECOMMENDATIONS*
+1. [Most impactful action] — [why, based on today's data]
+2. [Secondary action] — [reasoning]
+3. [Optional: timing recommendation] — [e.g., "aim for bed by 10:30 PM"]
+
+*PATTERNS TO NOTE*
+[Any correlations from recent data - e.g., "Last 3 days with evening magnesium showed +8% deep sleep"]
+
+*ALERTS*
+[Only if something today suggests poor sleep risk - explain why]
+"""
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -957,6 +1017,127 @@ Be specific with numbers. Use status emojis: ✅ (normal), ⚠️ (notable devia
     return response.content[0].text
 
 
+def generate_evening_brief_with_claude(
+    api_key: str,
+    today: str,
+    metrics: dict,
+    detailed_workouts: list,
+    baselines: dict,
+    historical_metrics: list,
+    today_interventions: list,
+    recent_briefs: list
+) -> str:
+    """Use Claude Opus 4.5 to generate the evening brief with today's context."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # Build context focused on today's activity and tonight's sleep preparation
+    user_prompt = f"""Generate my evening optimization brief for {today}.
+
+═══════════════════════════════════════════════════════════════════════════════
+TODAY'S ACTIVITY & STRESS DATA
+═══════════════════════════════════════════════════════════════════════════════
+
+```json
+{json.dumps(metrics, indent=2)}
+```
+
+Key observations:
+- Steps: {metrics.get('steps', 'N/A')}
+- Activity score: {metrics.get('activity_score', 'N/A')}
+- Stress high: {metrics.get('stress_high', 'N/A')} min
+- Recovery high: {metrics.get('recovery_high', 'N/A')} min
+- Stress summary: {metrics.get('stress_day_summary', 'N/A')}
+
+═══════════════════════════════════════════════════════════════════════════════
+TODAY'S WORKOUTS
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+
+    if detailed_workouts:
+        user_prompt += f"```json\n{json.dumps(detailed_workouts, indent=2)}\n```\n\n"
+        total_mins = sum(w.get('duration_minutes', 0) for w in detailed_workouts)
+        total_cals = sum(w.get('calories', 0) or 0 for w in detailed_workouts)
+        activities = [w.get('activity') for w in detailed_workouts if w.get('activity')]
+        user_prompt += f"Summary: {len(detailed_workouts)} workout(s), {total_mins} total minutes, {total_cals} calories\n"
+        user_prompt += f"Activities: {', '.join(activities)}\n"
+    else:
+        user_prompt += "No workouts recorded today.\n"
+
+    user_prompt += """
+═══════════════════════════════════════════════════════════════════════════════
+TODAY'S INTERVENTIONS (logged so far)
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+
+    if today_interventions:
+        for entry in today_interventions:
+            time = entry.get('time', '??:??')
+            cleaned = entry.get('cleaned', entry.get('raw', 'unknown'))
+            user_prompt += f"- {time}: {cleaned}\n"
+    else:
+        user_prompt += "No interventions logged today yet.\n"
+
+    user_prompt += f"""
+═══════════════════════════════════════════════════════════════════════════════
+BASELINES (rolling 60-day averages)
+═══════════════════════════════════════════════════════════════════════════════
+
+```json
+{json.dumps(baselines.get('metrics', {}), indent=2)}
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+RECENT SLEEP PATTERNS (last 7 days)
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+
+    # Include last 7 days of sleep data for pattern analysis
+    if historical_metrics:
+        for day_data in historical_metrics[:7]:
+            date = day_data.get('date', 'unknown')
+            summary = day_data.get('summary', {})
+            line = f"{date}: Sleep={summary.get('sleep_score', '-')}, HRV={summary.get('hrv', '-')}, Deep={summary.get('deep_sleep_minutes', '-')}min"
+            if summary.get('stress_high') is not None:
+                line += f", Stress={summary.get('stress_high')}min"
+            user_prompt += line + "\n"
+    else:
+        user_prompt += "No historical data available yet.\n"
+
+    user_prompt += """
+═══════════════════════════════════════════════════════════════════════════════
+RECENT BRIEFS (for context)
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+
+    if recent_briefs:
+        for brief in recent_briefs[:2]:  # Last 2 briefs for context
+            user_prompt += f"--- {brief.get('date', 'unknown')} ---\n{brief.get('content', '')[:500]}...\n\n"
+    else:
+        user_prompt += "No recent briefs available.\n"
+
+    user_prompt += """
+Based on today's data, generate evening recommendations to optimize tonight's sleep.
+Consider what interventions would be most helpful given today's activity and stress levels.
+"""
+
+    response = client.messages.create(
+        model="claude-opus-4-5-20251101",
+        max_tokens=1500,
+        system=EVENING_SYSTEM_PROMPT,
+        messages=[
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+
+    return response.content[0].text
+
+
 # ============================================================================
 # MAIN AGENT FUNCTION
 # ============================================================================
@@ -1091,6 +1272,147 @@ def morning_brief():
         raise
 
 
+@app.function(
+    secrets=[
+        modal.Secret.from_name("anthropic"),
+        modal.Secret.from_name("oura"),
+        modal.Secret.from_name("telegram"),
+    ],
+    volumes={"/data": volume},
+    timeout=300,
+    # DISABLED: Evening brief not useful until Oura syncs day's data reliably
+    # schedule=modal.Cron("0 0 * * *"),  # 00:00 UTC = 7:00 PM EST
+)
+def evening_brief():
+    """
+    Evening brief function. Runs daily at 7 PM EST to:
+    1. Analyze today's activity, stress, and workouts
+    2. Review interventions logged today
+    3. Generate sleep preparation recommendations with Claude
+    4. Send brief to Telegram
+    """
+    today = now_nyc().strftime("%Y-%m-%d")
+
+    oura_token = os.environ.get("OURA_ACCESS_TOKEN")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    print(f"Starting evening brief for {today}")
+
+    try:
+        ensure_directories()
+        volume.reload()
+
+        # Fetch today's activity, stress, and workout data
+        print(f"Fetching Oura data for today ({today})...")
+
+        # Get today's activity and stress (may be partial but mostly complete by 7 PM)
+        oura_data = {}
+        try:
+            activity_data = fetch_oura_data(oura_token, "daily_activity", today, today)
+            oura_data["daily_activity"] = activity_data.get("data", [])
+        except Exception as e:
+            print(f"Warning: Could not fetch activity data: {e}")
+            oura_data["daily_activity"] = []
+
+        try:
+            stress_data = fetch_oura_data(oura_token, "daily_stress", today, today)
+            oura_data["daily_stress"] = stress_data.get("data", [])
+        except Exception as e:
+            print(f"Warning: Could not fetch stress data: {e}")
+            oura_data["daily_stress"] = []
+
+        try:
+            workout_data = fetch_oura_data(oura_token, "workout", today, today)
+            oura_data["workouts"] = workout_data.get("data", [])
+        except Exception as e:
+            print(f"Warning: Could not fetch workout data: {e}")
+            oura_data["workouts"] = []
+
+        # Extract metrics from today's data
+        metrics = {}
+        if oura_data.get("daily_activity"):
+            activity = oura_data["daily_activity"][0]
+            metrics["activity_score"] = activity.get("score")
+            metrics["steps"] = activity.get("steps")
+
+        if oura_data.get("daily_stress"):
+            stress = oura_data["daily_stress"][0]
+            stress_sec = stress.get("stress_high")
+            recovery_sec = stress.get("recovery_high")
+            metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
+            metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
+            metrics["stress_day_summary"] = stress.get("day_summary")
+
+        # Extract detailed workouts
+        detailed_workouts = extract_detailed_workouts(oura_data)
+        print(f"Extracted {len(detailed_workouts)} workout(s) for today")
+
+        # Load today's interventions
+        today_interventions = []
+        interventions_file = INTERVENTIONS_DIR / f"{today}.jsonl"
+        if interventions_file.exists():
+            with open(interventions_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            today_interventions.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        print(f"Loaded {len(today_interventions)} intervention(s) for today")
+
+        # Load baselines and historical context
+        baselines = load_baselines()
+        historical_metrics = load_historical_metrics(7)  # Last 7 days for sleep patterns
+        recent_briefs = load_recent_briefs(3)
+
+        print(f"Loaded context: {len(historical_metrics)} days of metrics")
+
+        # Generate evening brief with Claude
+        print("Generating evening brief with Claude Opus 4.5...")
+        brief_content = generate_evening_brief_with_claude(
+            anthropic_key,
+            today,
+            metrics,
+            detailed_workouts,
+            baselines,
+            historical_metrics,
+            today_interventions,
+            recent_briefs
+        )
+
+        # Save brief with -evening suffix
+        brief_file = BRIEFS_DIR / f"{today}-evening.md"
+        with open(brief_file, 'w') as f:
+            f.write(brief_content)
+        print(f"Saved evening brief to {brief_file}")
+
+        # Commit volume changes
+        volume.commit()
+
+        # Send to Telegram
+        telegram_message = f"*Evening Brief — {today}*\n\n{brief_content}"
+
+        if send_telegram(telegram_message, bot_token, chat_id):
+            print("Evening brief sent to Telegram")
+        else:
+            print("Warning: Failed to send to Telegram, but brief saved")
+
+        return {"status": "success", "date": today, "type": "evening", "metrics": metrics}
+
+    except Exception as e:
+        error_msg = f"Evening brief failed: {str(e)}"
+        print(f"Error: {error_msg}")
+
+        # Try to send error notification
+        if bot_token and chat_id:
+            send_telegram(f"*Oura Agent Error*\n\n`{error_msg}`", bot_token, chat_id)
+
+        raise
+
+
 # ============================================================================
 # MANUAL TRIGGERS & UTILITIES
 # ============================================================================
@@ -1171,6 +1493,50 @@ def clear_today_interventions():
         print(f"Cleared interventions for {today}")
     else:
         print(f"No interventions file for {today}")
+
+
+@app.function(secrets=[modal.Secret.from_name("oura")])
+def debug_workouts(date: str = None, days_back: int = 7):
+    """Debug: Check Oura API for workouts. Fetches a range to ensure we catch all workouts."""
+    import os
+    from datetime import timedelta
+
+    if date is None:
+        date = now_nyc().strftime("%Y-%m-%d")
+
+    token = os.environ.get("OURA_ACCESS_TOKEN")
+
+    # Calculate start date (days_back days ago)
+    end_dt = now_nyc()
+    start_dt = end_dt - timedelta(days=days_back)
+    start_date = start_dt.strftime("%Y-%m-%d")
+    end_date = end_dt.strftime("%Y-%m-%d")
+
+    print(f"Fetching workouts from {start_date} to {end_date} from Oura API...")
+
+    url = f"{OURA_API_BASE}/workout"
+    params = {"start_date": start_date, "end_date": end_date}
+    print(f"URL: {url}")
+    print(f"Params: {params}")
+
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=30
+    )
+    print(f"Response status: {response.status_code}")
+    response.raise_for_status()
+    data = response.json()
+
+    workouts = data.get("data", [])
+    print(f"Found {len(workouts)} workout(s) in range")
+
+    for w in workouts:
+        print(f"  - {w.get('day')}: {w.get('activity')}, {w.get('start_datetime')} to {w.get('end_datetime')}")
+        print(f"    calories={w.get('calories')}, intensity={w.get('intensity')}, source={w.get('source')}")
+
+    return data
 
 
 @app.function(volumes={"/data": volume})
@@ -1563,11 +1929,15 @@ Keep response under 3 lines. No emojis. Be concise."""
 
 
 def get_latest_brief() -> str:
-    """Get the most recent brief."""
+    """Get the most recent morning brief."""
     ensure_directories()
-    briefs = sorted(BRIEFS_DIR.glob("*.md"), reverse=True)
+    # Only return morning briefs (exclude -evening suffix)
+    briefs = [b for b in BRIEFS_DIR.glob("*.md") if "-evening" not in b.name]
     if briefs:
-        with open(briefs[0]) as f:
+        # Sort by modification time, most recent first
+        briefs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        latest = briefs[0]
+        with open(latest) as f:
             return f.read()
     return "No briefs available yet."
 

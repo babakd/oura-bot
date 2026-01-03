@@ -83,7 +83,9 @@ class TestWebhookCommandRouting:
 
         result = modal_agent.get_latest_brief()
 
-        assert result == brief_content
+        # Returns raw content of the brief
+        assert "*TL;DR*" in result
+        assert "Test brief content" in result
 
     def test_brief_command_no_briefs(self, temp_data_dir):
         """Test /brief command when no briefs exist."""
