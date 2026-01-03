@@ -275,3 +275,162 @@ class TestFormatInterventionResponse:
         # Should use fallback
         assert "Logged" in response
         assert "1 today" in response
+
+
+class TestPhotoHandling:
+    """Tests for photo message handling."""
+
+    def test_download_telegram_photo(self, monkeypatch):
+        """Test downloading a photo from Telegram."""
+        # Mock requests.get for both API calls
+        mock_responses = [
+            # First call: getFile API
+            MagicMock(
+                status_code=200,
+                json=lambda: {"ok": True, "result": {"file_path": "photos/test.jpg"}}
+            ),
+            # Second call: file download
+            MagicMock(status_code=200, content=b"fake image data")
+        ]
+        call_count = [0]
+
+        def mock_get(*args, **kwargs):
+            response = mock_responses[call_count[0]]
+            call_count[0] += 1
+            response.raise_for_status = lambda: None
+            return response
+
+        import requests
+        monkeypatch.setattr(requests, "get", mock_get)
+
+        result = modal_agent.download_telegram_photo("test-token", "test-file-id")
+
+        assert result == b"fake image data"
+        assert call_count[0] == 2
+
+    def test_analyze_photo_with_claude(self, monkeypatch):
+        """Test analyzing a photo with Claude Vision."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="Vitamin D 5000 IU")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
+
+        result = modal_agent.analyze_photo_with_claude(
+            "fake-key",
+            b"fake image data",
+            caption="my supplements"
+        )
+
+        assert result == "Vitamin D 5000 IU"
+        mock_client.messages.create.assert_called_once()
+
+        # Verify the call included image content
+        call_args = mock_client.messages.create.call_args
+        messages = call_args.kwargs["messages"]
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        assert any(c.get("type") == "image" for c in content)
+
+    def test_analyze_photo_includes_caption(self, monkeypatch):
+        """Test that caption is included in the prompt."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="Protein shake")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
+
+        modal_agent.analyze_photo_with_claude(
+            "fake-key",
+            b"fake image data",
+            caption="post-workout drink"
+        )
+
+        call_args = mock_client.messages.create.call_args
+        messages = call_args.kwargs["messages"]
+        text_content = [c for c in messages[0]["content"] if c.get("type") == "text"][0]
+        assert "post-workout drink" in text_content["text"]
+
+    def test_analyze_photo_not_intervention(self, monkeypatch):
+        """Test handling of non-intervention photos."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="NOT_AN_INTERVENTION")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
+
+        result = modal_agent.analyze_photo_with_claude("fake-key", b"fake image data")
+
+        assert result == "NOT_AN_INTERVENTION"
+
+    def test_photo_message_detection(self):
+        """Test detecting photo messages in webhook payload."""
+        # Photo message
+        photo_request = {
+            "message": {
+                "photo": [
+                    {"file_id": "small", "width": 90, "height": 90},
+                    {"file_id": "large", "width": 800, "height": 600}
+                ],
+                "caption": "my vitamins",
+                "chat": {"id": 12345}
+            }
+        }
+
+        message = photo_request.get("message", {})
+        photo = message.get("photo")
+
+        assert photo is not None
+        assert len(photo) == 2
+        # Should use largest (last) photo
+        assert photo[-1]["file_id"] == "large"
+        assert message.get("caption") == "my vitamins"
+
+    def test_text_message_has_no_photo(self):
+        """Test that text messages don't have photo field."""
+        text_request = {
+            "message": {
+                "text": "/status",
+                "chat": {"id": 12345}
+            }
+        }
+
+        message = text_request.get("message", {})
+        photo = message.get("photo")
+
+        assert photo is None
+
+
+class TestHelpCommandWithPhotos:
+    """Tests for /help command including photo support."""
+
+    def test_help_includes_photo_support(self):
+        """Test help response mentions photo capability."""
+        help_text = """Commands:
+/status - Today's interventions
+/brief - Latest morning brief
+/clear - Clear today's interventions
+/help - Show this
+
+Or just type naturally:
+  "2 neuro-mag capsules"
+  "20 min sauna"
+  "glass of wine with dinner"
+
+Or send a photo of:
+  Supplement bottles
+  Food/drinks
+  Workout activities"""
+
+        assert "photo" in help_text.lower()
+        assert "Supplement" in help_text
+        assert "Food" in help_text

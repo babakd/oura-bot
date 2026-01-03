@@ -8,6 +8,7 @@ import modal
 import os
 import json
 import requests
+import base64
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -1942,6 +1943,72 @@ def get_latest_brief() -> str:
     return "No briefs available yet."
 
 
+def download_telegram_photo(bot_token: str, file_id: str) -> bytes:
+    """Download a photo from Telegram using the getFile API."""
+    # Step 1: Get file path from Telegram
+    response = requests.get(
+        f"https://api.telegram.org/bot{bot_token}/getFile",
+        params={"file_id": file_id},
+        timeout=30
+    )
+    response.raise_for_status()
+    file_path = response.json()["result"]["file_path"]
+
+    # Step 2: Download the actual file
+    file_response = requests.get(
+        f"https://api.telegram.org/file/bot{bot_token}/{file_path}",
+        timeout=30
+    )
+    file_response.raise_for_status()
+    return file_response.content
+
+
+def analyze_photo_with_claude(api_key: str, image_data: bytes, caption: str = "") -> str:
+    """Use Claude Vision to analyze a photo and extract intervention details."""
+    import anthropic
+
+    # Convert to base64
+    image_base64 = base64.b64encode(image_data).decode("utf-8")
+
+    caption_context = f'User caption: "{caption}"' if caption else ""
+
+    prompt = f"""Analyze this image and extract any health-related intervention information.
+
+Look for:
+- Supplements/vitamins (name, dosage, quantity)
+- Food/drinks (what it is, portion if visible)
+- Exercise equipment or activity
+- Wellness products (sauna, ice bath, etc.)
+
+{caption_context}
+
+Respond with ONLY a brief intervention log entry (under 10 words).
+If the image doesn't show a health intervention, respond with "NOT_AN_INTERVENTION".
+Examples: "Vitamin D 5000 IU", "Post-workout protein shake", "20 min sauna session"
+"""
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=100,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": image_base64,
+                    }
+                },
+                {"type": "text", "text": prompt}
+            ]
+        }]
+    )
+    return response.content[0].text.strip()
+
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -1990,11 +2057,41 @@ async def telegram_webhook(request: Request):
     if sender_chat_id != chat_id:
         return {"ok": True}
 
-    # Ignore empty messages
-    if not text.strip():
+    response_text = None
+
+    # Check for photo message
+    photo = message.get("photo")
+    if photo:
+        # Get largest resolution (last in array)
+        file_id = photo[-1]["file_id"]
+        caption = message.get("caption", "")
+
+        try:
+            # Download photo from Telegram
+            image_data = download_telegram_photo(bot_token, file_id)
+
+            # Analyze with Claude Vision
+            intervention = analyze_photo_with_claude(anthropic_key, image_data, caption)
+
+            if intervention == "NOT_AN_INTERVENTION":
+                response_text = "I couldn't identify a health intervention in that photo. Try adding a caption describing what it is."
+            else:
+                # Save like a normal intervention (use intervention as both raw and cleaned)
+                save_intervention_raw(intervention, intervention)
+                volume.commit()
+                response_text = format_intervention_response(anthropic_key, intervention)
+        except Exception as e:
+            print(f"Photo processing error: {e}")
+            response_text = "Sorry, I couldn't process that photo. Try sending a text description instead."
+
+        # Send response and return
+        if response_text:
+            send_telegram(response_text, bot_token, chat_id)
         return {"ok": True}
 
-    response_text = None
+    # Ignore empty text messages (but photos handled above)
+    if not text.strip():
+        return {"ok": True}
 
     if text.startswith("/log"):
         # Extract everything after /log
@@ -2050,7 +2147,12 @@ async def telegram_webhook(request: Request):
 Or just type naturally:
   "2 neuro-mag capsules"
   "20 min sauna"
-  "glass of wine with dinner" """
+  "glass of wine with dinner"
+
+Or send a photo of:
+  Supplement bottles
+  Food/drinks
+  Workout activities"""
 
     elif text.startswith("/"):
         # Unknown command
