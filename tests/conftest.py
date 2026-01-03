@@ -23,6 +23,7 @@ def temp_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(modal_agent, "RAW_DIR", tmp_path / "raw")
     monkeypatch.setattr(modal_agent, "METRICS_DIR", tmp_path / "metrics")
     monkeypatch.setattr(modal_agent, "INTERVENTIONS_DIR", tmp_path / "interventions")
+    monkeypatch.setattr(modal_agent, "CONVERSATIONS_DIR", tmp_path / "conversations")
     monkeypatch.setattr(modal_agent, "BASELINES_FILE", tmp_path / "baselines.json")
 
     # Create directories
@@ -30,6 +31,7 @@ def temp_data_dir(tmp_path, monkeypatch):
     (tmp_path / "raw").mkdir()
     (tmp_path / "metrics").mkdir()
     (tmp_path / "interventions").mkdir()
+    (tmp_path / "conversations").mkdir()
 
     return tmp_path
 

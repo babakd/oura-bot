@@ -16,8 +16,9 @@ A personal health optimization agent that:
 2. Analyzes sleep, readiness, HRV against personal baselines
 3. Generates actionable recommendations using Claude Opus 4.5
 4. Sends morning brief via Telegram
-5. Accepts intervention logging via Telegram replies (natural language)
-6. Tracks interventions and correlates with outcomes over time
+5. Accepts intervention logging via Telegram (text, natural language, or photos)
+6. Answers questions about health data with full context (arbitrary chat)
+7. Tracks interventions and correlates with outcomes over time
 
 ## Tech Stack
 
@@ -39,6 +40,7 @@ A personal health optimization agent that:
 | Extracted metrics | 28 days | Summary metrics for historical context |
 | Interventions | 28 days | Correlation with outcomes |
 | Briefs | 28 days | Continuity and reference |
+| Conversations | 28 days | Chat context for follow-up questions |
 | Baselines | 60-day rolling | Rolling average of recent 60 days (includes recent data) |
 
 ### Directory Structure
@@ -60,8 +62,10 @@ oura_agent/                      # Git repository
 │   └── YYYY-MM-DD.json
 ├── briefs/                      # Generated morning briefs (28 days)
 │   └── YYYY-MM-DD.md
-└── interventions/               # Logged interventions (28 days)
-    └── YYYY-MM-DD.jsonl         # JSONL format (one entry per line)
+├── interventions/               # Logged interventions (28 days)
+│   └── YYYY-MM-DD.jsonl         # JSONL format (one entry per line)
+└── conversations/               # Chat history (28 days)
+    └── history.jsonl            # All conversation messages
 ```
 
 ## Credentials
@@ -140,19 +144,47 @@ Uses JSONL (JSON Lines) format for atomic appends. Each line is a single entry:
 ### Telegram Bot Commands
 
 ```
-/log <text>  - Log an intervention (or just type naturally)
 /status      - Show today's interventions
 /brief       - Show the latest morning brief
 /clear       - Clear today's interventions
 /help        - Show available commands
 ```
 
-Or just message naturally (no command needed):
+### Logging Interventions
+
+Text (natural language - intent is auto-detected):
 ```
 took 2 magnesium capsules
 20 min sauna session
 glass of wine with dinner
 ```
+
+Photos (Claude Vision extracts intervention details):
+- Send a photo of supplement bottles, food, or workout activities
+- Optionally add a caption for context
+
+### Asking Questions (Arbitrary Chat)
+
+The bot uses intent classification to distinguish questions from interventions:
+```
+How did I sleep last week?
+What's my HRV trend?
+Compare today to my baseline
+Should I take it easy today?
+```
+
+Chat includes:
+- Full 28-day metrics history
+- 60-day baselines for comparison
+- Today's logged interventions
+- Last 10 conversation messages for context
+
+### Intent Classification
+
+Messages are classified as INTERVENTION or QUESTION:
+- **Clear questions**: Contains `?`, starts with how/what/why/when/etc.
+- **Clear interventions**: Short, action-oriented, contains took/had/did/just/etc.
+- **Ambiguous**: Claude Haiku classifies (fast, ~$0.0001/call)
 
 ## CLI Commands
 

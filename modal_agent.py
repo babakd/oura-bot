@@ -49,6 +49,7 @@ BRIEFS_DIR = DATA_DIR / "briefs"
 RAW_DIR = DATA_DIR / "raw"
 METRICS_DIR = DATA_DIR / "metrics"  # Extracted daily metrics
 INTERVENTIONS_DIR = DATA_DIR / "interventions"
+CONVERSATIONS_DIR = DATA_DIR / "conversations"  # Chat history
 BASELINES_FILE = DATA_DIR / "baselines.json"
 
 OURA_API_BASE = "https://api.ouraring.com/v2/usercollection"
@@ -198,13 +199,42 @@ Interventions logged: [list or "none yet"]
 [Only if something today suggests poor sleep risk - explain why]
 """
 
+CHAT_SYSTEM_PROMPT = """You are a personal health assistant with access to the user's Oura Ring biometric data.
+
+## Your Role
+- Answer questions about the user's health data (sleep, HRV, readiness, activity, stress)
+- Provide personalized insights based on their 60-day baselines and 28-day history
+- Correlate interventions (supplements, activities) with outcomes
+- Give actionable health recommendations
+
+## Data Available
+- Last 28 days of daily metrics (sleep score, HRV, deep sleep, RHR, readiness, stress, workouts)
+- 60-day rolling baselines (mean ± std for all metrics)
+- Today's interventions logged so far
+- Recent conversation history for context
+
+## Guidelines
+- Be conversational but data-driven
+- Reference specific numbers and dates when relevant
+- Compare to user's personal baselines, not population averages
+- If asked about data beyond 28 days, explain the limitation but use baselines to estimate patterns
+- Provide health advice within general wellness scope
+- For medical concerns, suggest consulting a healthcare provider
+
+## Response Style
+- Keep responses concise (2-4 sentences for simple questions)
+- Use bullet points for trends or comparisons
+- Include specific numbers when available
+- No emojis
+"""
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
 def ensure_directories():
     """Create data directories if they don't exist."""
-    for dir_path in [BRIEFS_DIR, RAW_DIR, METRICS_DIR, INTERVENTIONS_DIR]:
+    for dir_path in [BRIEFS_DIR, RAW_DIR, METRICS_DIR, INTERVENTIONS_DIR, CONVERSATIONS_DIR]:
         dir_path.mkdir(parents=True, exist_ok=True)
 
 
@@ -812,6 +842,9 @@ def prune_old_data():
         file_date = intervention_file.stem
         if file_date < cutoff_str:
             intervention_file.unlink()
+
+    # Prune conversation history (messages older than 28 days)
+    prune_conversation_history()
 
     if pruned_count > 0:
         print(f"Pruned {pruned_count} files older than {cutoff_str}")
@@ -1891,6 +1924,237 @@ def get_today_interventions() -> list:
     return data.get("entries", [])
 
 
+# ============================================================================
+# CONVERSATION STORAGE
+# ============================================================================
+
+def load_conversation_history(limit: int = 20) -> list:
+    """Load recent conversation messages."""
+    ensure_directories()
+
+    try:
+        volume.reload()
+    except RuntimeError:
+        pass  # Running locally
+
+    conv_file = CONVERSATIONS_DIR / "history.jsonl"
+    if not conv_file.exists():
+        return []
+
+    messages = []
+    with open(conv_file) as f:
+        for line in f:
+            if line.strip():
+                try:
+                    messages.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    # Return most recent N messages
+    return messages[-limit:]
+
+
+def save_conversation_message(role: str, content: str):
+    """Append a message to conversation history."""
+    ensure_directories()
+
+    try:
+        volume.reload()
+    except RuntimeError:
+        pass  # Running locally
+
+    conv_file = CONVERSATIONS_DIR / "history.jsonl"
+
+    entry = {
+        "timestamp": now_nyc().isoformat(),
+        "role": role,  # "user" or "assistant"
+        "content": content
+    }
+
+    with open(conv_file, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def prune_conversation_history():
+    """Remove messages older than 28 days."""
+    conv_file = CONVERSATIONS_DIR / "history.jsonl"
+    if not conv_file.exists():
+        return
+
+    cutoff = now_nyc() - timedelta(days=RAW_WINDOW_DAYS)
+    kept_messages = []
+
+    with open(conv_file) as f:
+        for line in f:
+            if line.strip():
+                try:
+                    msg = json.loads(line)
+                    # Parse timestamp and compare
+                    ts = datetime.fromisoformat(msg["timestamp"])
+                    if ts >= cutoff:
+                        kept_messages.append(msg)
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+
+    # Rewrite file with only kept messages
+    with open(conv_file, "w") as f:
+        for msg in kept_messages:
+            f.write(json.dumps(msg) + "\n")
+
+
+# ============================================================================
+# CHAT FUNCTIONALITY
+# ============================================================================
+
+def classify_intent(api_key: str, text: str) -> str:
+    """Classify message as INTERVENTION or QUESTION.
+
+    Uses pattern matching for clear cases, Claude Haiku for ambiguous.
+    """
+    import anthropic
+
+    text_lower = text.lower().strip()
+
+    # Clear QUESTION patterns
+    if "?" in text:
+        return "QUESTION"
+    question_starters = (
+        "how", "what", "why", "when", "did", "is", "are", "should",
+        "can", "could", "would", "do", "does", "tell me", "show me",
+        "compare", "which", "where", "who"
+    )
+    if any(text_lower.startswith(q) for q in question_starters):
+        return "QUESTION"
+
+    # Clear INTERVENTION patterns (short, action-oriented, past tense)
+    intervention_verbs = (
+        "took", "had", "did", "finished", "drank", "ate", "completed",
+        "logged", "just", "taking", "having", "doing"
+    )
+    words = text_lower.split()
+    if len(words) <= 8 and any(v in words[:3] for v in intervention_verbs):
+        return "INTERVENTION"
+
+    # Ambiguous - ask Claude Haiku (fast and cheap)
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": f'Is this a health intervention to log (like "took vitamins" or "did sauna") or a question/statement? Reply only INTERVENTION or QUESTION.\n\nMessage: "{text}"'
+            }]
+        )
+        result = response.content[0].text.strip().upper()
+        return "INTERVENTION" if "INTERVENTION" in result else "QUESTION"
+    except Exception:
+        # Default to question if classification fails
+        return "QUESTION"
+
+
+def build_chat_context(baselines: dict, metrics: list, interventions: list, briefs: list) -> str:
+    """Build context string for chat with health data."""
+    lines = []
+
+    # Baselines summary
+    if baselines.get("metrics"):
+        lines.append("## Your Baselines (60-day rolling averages)")
+        for metric, data in baselines["metrics"].items():
+            if data.get("mean") is not None:
+                mean = data["mean"]
+                std = data.get("std", 0)
+                lines.append(f"- {metric}: {mean:.1f} ± {std:.1f}")
+        lines.append("")
+
+    # Recent metrics (last 7 days for chat, more concise than brief)
+    if metrics:
+        lines.append("## Recent Daily Metrics (last 7 days)")
+        for day_data in metrics[-7:]:
+            date = day_data.get("date", "unknown")
+            summary = day_data.get("summary", {})
+            sleep = summary.get("sleep_score", "N/A")
+            hrv = summary.get("hrv", "N/A")
+            readiness = summary.get("readiness", "N/A")
+            deep = summary.get("deep_sleep_minutes", "N/A")
+            rhr = summary.get("resting_hr", "N/A")
+            lines.append(f"- {date}: Sleep {sleep}, HRV {hrv}, Readiness {readiness}, Deep {deep}min, RHR {rhr}")
+        lines.append("")
+
+    # Today's interventions
+    if interventions:
+        lines.append("## Today's Interventions")
+        for entry in interventions:
+            cleaned = entry.get("cleaned", entry.get("raw", "unknown"))
+            time = entry.get("time", "")
+            lines.append(f"- {time}: {cleaned}")
+        lines.append("")
+
+    # Recent briefs (just dates and TL;DR for context)
+    if briefs:
+        lines.append("## Recent Brief Highlights")
+        for brief in briefs[-2:]:
+            date = brief.get("date", "unknown")
+            content = brief.get("content", "")
+            # Extract just the TL;DR section
+            if "*TL;DR*" in content:
+                tldr_start = content.find("*TL;DR*")
+                tldr_end = content.find("*", tldr_start + 7)
+                if tldr_end == -1:
+                    tldr_end = min(tldr_start + 200, len(content))
+                tldr = content[tldr_start:tldr_end].strip()
+                lines.append(f"- {date}: {tldr[:150]}...")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def handle_chat_message(api_key: str, user_message: str) -> str:
+    """Handle a conversational message with full health data context."""
+    import anthropic
+
+    # Load all available data
+    baselines = load_baselines()
+    historical_metrics = load_historical_metrics(RAW_WINDOW_DAYS)
+    today_interventions = get_today_interventions()
+    recent_briefs = load_recent_briefs(3)
+    conversation_history = load_conversation_history(10)
+
+    # Build context
+    context = build_chat_context(
+        baselines, historical_metrics,
+        today_interventions, recent_briefs
+    )
+
+    # Build messages with conversation history
+    messages = []
+    for msg in conversation_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_message})
+
+    # Call Claude
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=500,
+            system=CHAT_SYSTEM_PROMPT + "\n\n## Current Health Data\n" + context,
+            messages=messages
+        )
+
+        assistant_response = response.content[0].text.strip()
+
+        # Save both messages to history
+        save_conversation_message("user", user_message)
+        save_conversation_message("assistant", assistant_response)
+
+        return assistant_response
+
+    except Exception as e:
+        print(f"Chat error: {e}")
+        return "Sorry, I couldn't process that question. Try asking again or rephrase."
+
+
 def format_intervention_response(api_key: str, just_logged: str) -> str:
     """Use Claude to generate a natural acknowledgment with today's summary."""
     import anthropic
@@ -2144,26 +2408,34 @@ async def telegram_webhook(request: Request):
 /clear - Clear today's interventions
 /help - Show this
 
-Or just type naturally:
-  "2 neuro-mag capsules"
+Log interventions:
+  "took 2 magnesium"
   "20 min sauna"
-  "glass of wine with dinner"
+  [send a photo]
 
-Or send a photo of:
-  Supplement bottles
-  Food/drinks
-  Workout activities"""
+Ask questions:
+  "How did I sleep last week?"
+  "What's my HRV trend?"
+  "Compare today to my baseline" """
 
     elif text.startswith("/"):
         # Unknown command
         response_text = "Unknown command. Try /help"
 
     else:
-        # Natural language - clean and store
-        cleaned_text = clean_intervention_with_claude(anthropic_key, text)
-        save_intervention_raw(text, cleaned_text)
-        volume.commit()
-        response_text = format_intervention_response(anthropic_key, cleaned_text)
+        # Natural language - classify intent
+        intent = classify_intent(anthropic_key, text)
+
+        if intent == "INTERVENTION":
+            # Log as intervention
+            cleaned_text = clean_intervention_with_claude(anthropic_key, text)
+            save_intervention_raw(text, cleaned_text)
+            volume.commit()
+            response_text = format_intervention_response(anthropic_key, cleaned_text)
+        else:
+            # Handle as chat/question
+            response_text = handle_chat_message(anthropic_key, text)
+            volume.commit()  # Save conversation history
 
     # Send response if we have one
     if response_text:
