@@ -202,10 +202,32 @@ Interventions logged: [list or "none yet"]
 CHAT_SYSTEM_PROMPT = """You are a personal health assistant with access to the user's Oura Ring biometric data.
 
 ## Your Role
-- Answer questions about the user's health data (sleep, HRV, readiness, activity, stress)
-- Provide personalized insights based on their 60-day baselines and 28-day history
-- Correlate interventions (supplements, activities) with outcomes
-- Give actionable health recommendations
+1. **Log interventions** - When the user reports something they did (supplements, activities, food, etc.)
+2. **Answer questions** - About their health data, trends, correlations, recommendations
+
+## Detecting Interventions vs Questions
+
+**Interventions** (things to log):
+- "took 2 magnesium" → logging a supplement
+- "20 min sauna" → logging an activity
+- "had a glass of wine" → logging consumption
+- "did 30 pushups" → logging exercise
+
+**Questions** (things to answer):
+- "How did I sleep?" → asking about data
+- "What's my HRV trend?" → asking for analysis
+- "Should I take magnesium?" → asking for advice
+
+## Response Format
+
+**If it's an intervention to log**, start your response with this exact format on the first line:
+[LOG: brief normalized description]
+
+Then follow with a natural acknowledgment. Example:
+[LOG: Magnesium 400mg]
+Got it. You've now logged magnesium and a sauna session today.
+
+**If it's a question**, just respond naturally without the [LOG:] prefix.
 
 ## Data Available
 - Last 28 days of daily metrics (sleep score, HRV, deep sleep, RHR, readiness, stress, workouts)
@@ -217,14 +239,7 @@ CHAT_SYSTEM_PROMPT = """You are a personal health assistant with access to the u
 - Be conversational but data-driven
 - Reference specific numbers and dates when relevant
 - Compare to user's personal baselines, not population averages
-- If asked about data beyond 28 days, explain the limitation but use baselines to estimate patterns
-- Provide health advice within general wellness scope
-- For medical concerns, suggest consulting a healthcare provider
-
-## Response Style
-- Keep responses concise (2-4 sentences for simple questions)
-- Use bullet points for trends or comparisons
-- Include specific numbers when available
+- Keep responses concise (2-4 sentences)
 - No emojis
 """
 
@@ -2006,53 +2021,6 @@ def prune_conversation_history():
 # CHAT FUNCTIONALITY
 # ============================================================================
 
-def classify_intent(api_key: str, text: str) -> str:
-    """Classify message as INTERVENTION or QUESTION.
-
-    Uses pattern matching for clear cases, Claude Haiku for ambiguous.
-    """
-    import anthropic
-
-    text_lower = text.lower().strip()
-
-    # Clear QUESTION patterns
-    if "?" in text:
-        return "QUESTION"
-    question_starters = (
-        "how", "what", "why", "when", "did", "is", "are", "should",
-        "can", "could", "would", "do", "does", "tell me", "show me",
-        "compare", "which", "where", "who"
-    )
-    if any(text_lower.startswith(q) for q in question_starters):
-        return "QUESTION"
-
-    # Clear INTERVENTION patterns (short, action-oriented, past tense)
-    intervention_verbs = (
-        "took", "had", "did", "finished", "drank", "ate", "completed",
-        "logged", "just", "taking", "having", "doing"
-    )
-    words = text_lower.split()
-    if len(words) <= 8 and any(v in words[:3] for v in intervention_verbs):
-        return "INTERVENTION"
-
-    # Ambiguous - ask Claude Haiku (fast and cheap)
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=20,
-            messages=[{
-                "role": "user",
-                "content": f'Is this a health intervention to log (like "took vitamins" or "did sauna") or a question/statement? Reply only INTERVENTION or QUESTION.\n\nMessage: "{text}"'
-            }]
-        )
-        result = response.content[0].text.strip().upper()
-        return "INTERVENTION" if "INTERVENTION" in result else "QUESTION"
-    except Exception:
-        # Default to question if classification fails
-        return "QUESTION"
-
-
 def build_chat_context(baselines: dict, metrics: list, interventions: list, briefs: list) -> str:
     """Build context string for chat with health data."""
     lines = []
@@ -2109,9 +2077,14 @@ def build_chat_context(baselines: dict, metrics: list, interventions: list, brie
     return "\n".join(lines)
 
 
-def handle_chat_message(api_key: str, user_message: str) -> str:
-    """Handle a conversational message with full health data context."""
+def handle_message(api_key: str, user_message: str) -> str:
+    """Handle any user message - Claude decides if it's an intervention or question.
+
+    If Claude identifies an intervention, it prefixes response with [LOG: description].
+    We parse that, save the intervention, and return the rest of the response.
+    """
     import anthropic
+    import re
 
     # Load all available data
     baselines = load_baselines()
@@ -2144,15 +2117,30 @@ def handle_chat_message(api_key: str, user_message: str) -> str:
 
         assistant_response = response.content[0].text.strip()
 
-        # Save both messages to history
-        save_conversation_message("user", user_message)
-        save_conversation_message("assistant", assistant_response)
+        # Check if Claude identified this as an intervention
+        log_match = re.match(r'^\[LOG:\s*(.+?)\]\s*\n?', assistant_response)
+        if log_match:
+            # Extract the cleaned intervention text
+            cleaned_intervention = log_match.group(1).strip()
+            # Remove the [LOG: ...] prefix from the response
+            display_response = assistant_response[log_match.end():].strip()
+            # Save the intervention
+            save_intervention_raw(user_message, cleaned_intervention)
 
-        return assistant_response
+            # Save conversation (without the LOG prefix for cleaner history)
+            save_conversation_message("user", user_message)
+            save_conversation_message("assistant", display_response)
+
+            return display_response
+        else:
+            # Regular question/chat - just save and return
+            save_conversation_message("user", user_message)
+            save_conversation_message("assistant", assistant_response)
+            return assistant_response
 
     except Exception as e:
-        print(f"Chat error: {e}")
-        return "Sorry, I couldn't process that question. Try asking again or rephrase."
+        print(f"Message handling error: {e}")
+        return "Sorry, I couldn't process that. Try again or rephrase."
 
 
 def format_intervention_response(api_key: str, just_logged: str) -> str:
@@ -2423,19 +2411,9 @@ Ask questions:
         response_text = "Unknown command. Try /help"
 
     else:
-        # Natural language - classify intent
-        intent = classify_intent(anthropic_key, text)
-
-        if intent == "INTERVENTION":
-            # Log as intervention
-            cleaned_text = clean_intervention_with_claude(anthropic_key, text)
-            save_intervention_raw(text, cleaned_text)
-            volume.commit()
-            response_text = format_intervention_response(anthropic_key, cleaned_text)
-        else:
-            # Handle as chat/question
-            response_text = handle_chat_message(anthropic_key, text)
-            volume.commit()  # Save conversation history
+        # Let Claude handle everything - it decides if it's an intervention or question
+        response_text = handle_message(anthropic_key, text)
+        volume.commit()
 
     # Send response if we have one
     if response_text:

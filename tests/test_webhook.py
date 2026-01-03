@@ -436,49 +436,13 @@ Ask questions:
         assert "baseline" in help_text
 
 
-class TestIntentClassification:
-    """Tests for classify_intent() function."""
+class TestHandleMessage:
+    """Tests for unified handle_message() function."""
 
-    def test_question_with_question_mark(self, monkeypatch):
-        """Test that messages with ? are classified as questions."""
-        # classify_intent uses pattern matching for clear cases
-        result = modal_agent.classify_intent("fake-key", "How did I sleep?")
-        assert result == "QUESTION"
-
-    def test_question_starting_with_how(self, monkeypatch):
-        """Test question words trigger QUESTION classification."""
-        result = modal_agent.classify_intent("fake-key", "how is my HRV trending")
-        assert result == "QUESTION"
-
-    def test_question_starting_with_what(self, monkeypatch):
-        """Test 'what' triggers QUESTION classification."""
-        result = modal_agent.classify_intent("fake-key", "what was my sleep score yesterday")
-        assert result == "QUESTION"
-
-    def test_question_starting_with_compare(self, monkeypatch):
-        """Test 'compare' triggers QUESTION classification."""
-        result = modal_agent.classify_intent("fake-key", "compare my sleep this week to last week")
-        assert result == "QUESTION"
-
-    def test_intervention_with_took(self, monkeypatch):
-        """Test 'took' triggers INTERVENTION classification."""
-        result = modal_agent.classify_intent("fake-key", "took 2 magnesium")
-        assert result == "INTERVENTION"
-
-    def test_intervention_with_had(self, monkeypatch):
-        """Test 'had' triggers INTERVENTION classification."""
-        result = modal_agent.classify_intent("fake-key", "had a glass of wine")
-        assert result == "INTERVENTION"
-
-    def test_intervention_with_just(self, monkeypatch):
-        """Test 'just' triggers INTERVENTION classification."""
-        result = modal_agent.classify_intent("fake-key", "just finished sauna")
-        assert result == "INTERVENTION"
-
-    def test_ambiguous_uses_claude(self, monkeypatch):
-        """Test that ambiguous messages use Claude for classification."""
+    def test_question_returns_response(self, temp_data_dir, mock_now_nyc, monkeypatch):
+        """Test that questions get responses without LOG prefix."""
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="QUESTION")]
+        mock_response.content = [MagicMock(text="Your sleep score was 82 last night.")]
 
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_response
@@ -486,17 +450,17 @@ class TestIntentClassification:
         import anthropic
         monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
 
-        # This is ambiguous - not a clear question or intervention
-        result = modal_agent.classify_intent("fake-key", "magnesium helps with sleep")
+        result = modal_agent.handle_message("fake-key", "How did I sleep?")
 
-        # Should have called Claude
-        mock_client.messages.create.assert_called_once()
-        assert result == "QUESTION"
+        assert "82" in result
+        # Should not have saved an intervention
+        interventions = modal_agent.get_today_interventions()
+        assert len(interventions) == 0
 
-    def test_ambiguous_classified_as_intervention(self, monkeypatch):
-        """Test Claude classifying as intervention."""
+    def test_intervention_saves_and_responds(self, temp_data_dir, mock_now_nyc, monkeypatch):
+        """Test that interventions are saved when Claude uses LOG prefix."""
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="INTERVENTION")]
+        mock_response.content = [MagicMock(text="[LOG: Magnesium 400mg]\nGot it, logged magnesium.")]
 
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_response
@@ -504,9 +468,67 @@ class TestIntentClassification:
         import anthropic
         monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
 
-        result = modal_agent.classify_intent("fake-key", "2 magnesium capsules")
+        result = modal_agent.handle_message("fake-key", "took 2 magnesium")
 
-        assert result == "INTERVENTION"
+        # Response should not include the LOG prefix
+        assert "[LOG:" not in result
+        assert "logged" in result.lower() or "magnesium" in result.lower()
+
+        # Intervention should be saved
+        interventions = modal_agent.get_today_interventions()
+        assert len(interventions) == 1
+        assert interventions[0]["cleaned"] == "Magnesium 400mg"
+
+    def test_log_prefix_parsing(self, temp_data_dir, mock_now_nyc, monkeypatch):
+        """Test various LOG prefix formats are parsed correctly."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="[LOG: Sauna 20 min]\nLogged your sauna session.")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
+
+        result = modal_agent.handle_message("fake-key", "20 min sauna")
+
+        interventions = modal_agent.get_today_interventions()
+        assert interventions[0]["cleaned"] == "Sauna 20 min"
+
+    def test_saves_conversation_history(self, temp_data_dir, mock_now_nyc, monkeypatch):
+        """Test that messages are saved to conversation history."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="Your HRV has been stable.")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
+
+        modal_agent.handle_message("fake-key", "What's my HRV trend?")
+
+        history = modal_agent.load_conversation_history()
+        assert len(history) == 2
+        assert history[0]["role"] == "user"
+        assert history[1]["role"] == "assistant"
+
+    def test_intervention_saves_clean_response_to_history(self, temp_data_dir, mock_now_nyc, monkeypatch):
+        """Test that intervention responses are saved without LOG prefix."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="[LOG: Vitamin D]\nLogged vitamin D.")]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
+
+        modal_agent.handle_message("fake-key", "took vitamin d")
+
+        history = modal_agent.load_conversation_history()
+        # The assistant response should not have the LOG prefix
+        assert "[LOG:" not in history[1]["content"]
 
 
 class TestConversationStorage:
@@ -608,67 +630,3 @@ class TestBuildChatContext:
         assert "Magnesium" in context
 
 
-class TestHandleChatMessage:
-    """Tests for handle_chat_message() function."""
-
-    def test_handle_chat_calls_claude(self, temp_data_dir, mock_now_nyc, monkeypatch):
-        """Test that handle_chat_message calls Claude with context."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Your sleep has been averaging 75 this week.")]
-
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-
-        import anthropic
-        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
-
-        result = modal_agent.handle_chat_message("fake-key", "How is my sleep?")
-
-        assert "sleep" in result.lower() or "75" in result
-        mock_client.messages.create.assert_called_once()
-
-    def test_handle_chat_saves_conversation(self, temp_data_dir, mock_now_nyc, monkeypatch):
-        """Test that chat messages are saved to history."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Response text")]
-
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-
-        import anthropic
-        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
-
-        modal_agent.handle_chat_message("fake-key", "Test question")
-
-        history = modal_agent.load_conversation_history()
-
-        assert len(history) == 2
-        assert history[0]["role"] == "user"
-        assert history[0]["content"] == "Test question"
-        assert history[1]["role"] == "assistant"
-
-    def test_handle_chat_includes_history(self, temp_data_dir, mock_now_nyc, monkeypatch):
-        """Test that previous conversation is included in Claude call."""
-        # Pre-populate some history
-        modal_agent.save_conversation_message("user", "Previous question")
-        modal_agent.save_conversation_message("assistant", "Previous answer")
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="New response")]
-
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-
-        import anthropic
-        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
-
-        modal_agent.handle_chat_message("fake-key", "New question")
-
-        # Check that messages include history
-        call_args = mock_client.messages.create.call_args
-        messages = call_args.kwargs["messages"]
-
-        assert len(messages) == 3  # 2 from history + 1 new
-        assert messages[0]["content"] == "Previous question"
-        assert messages[1]["content"] == "Previous answer"
-        assert messages[2]["content"] == "New question"
