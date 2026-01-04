@@ -17,14 +17,32 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 def temp_data_dir(tmp_path, monkeypatch):
     """Redirect all data paths to temp directory."""
     import modal_agent
+    from oura_agent import config
+    from oura_agent.storage import baselines, interventions, metrics, conversations
+    from oura_agent import utils
 
-    monkeypatch.setattr(modal_agent, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(modal_agent, "BRIEFS_DIR", tmp_path / "briefs")
-    monkeypatch.setattr(modal_agent, "RAW_DIR", tmp_path / "raw")
-    monkeypatch.setattr(modal_agent, "METRICS_DIR", tmp_path / "metrics")
-    monkeypatch.setattr(modal_agent, "INTERVENTIONS_DIR", tmp_path / "interventions")
-    monkeypatch.setattr(modal_agent, "CONVERSATIONS_DIR", tmp_path / "conversations")
-    monkeypatch.setattr(modal_agent, "BASELINES_FILE", tmp_path / "baselines.json")
+    # Patch all modules that reference these paths
+    modules_to_patch = [modal_agent, config]
+    for module in modules_to_patch:
+        monkeypatch.setattr(module, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(module, "BRIEFS_DIR", tmp_path / "briefs")
+        monkeypatch.setattr(module, "RAW_DIR", tmp_path / "raw")
+        monkeypatch.setattr(module, "METRICS_DIR", tmp_path / "metrics")
+        monkeypatch.setattr(module, "INTERVENTIONS_DIR", tmp_path / "interventions")
+        monkeypatch.setattr(module, "CONVERSATIONS_DIR", tmp_path / "conversations")
+        monkeypatch.setattr(module, "BASELINES_FILE", tmp_path / "baselines.json")
+
+    # Also patch the storage modules directly
+    monkeypatch.setattr(baselines, "BASELINES_FILE", tmp_path / "baselines.json")
+    monkeypatch.setattr(interventions, "INTERVENTIONS_DIR", tmp_path / "interventions")
+    monkeypatch.setattr(metrics, "METRICS_DIR", tmp_path / "metrics")
+    monkeypatch.setattr(metrics, "BRIEFS_DIR", tmp_path / "briefs")
+    monkeypatch.setattr(conversations, "CONVERSATIONS_DIR", tmp_path / "conversations")
+    monkeypatch.setattr(utils, "BRIEFS_DIR", tmp_path / "briefs")
+    monkeypatch.setattr(utils, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(utils, "METRICS_DIR", tmp_path / "metrics")
+    monkeypatch.setattr(utils, "INTERVENTIONS_DIR", tmp_path / "interventions")
+    monkeypatch.setattr(utils, "CONVERSATIONS_DIR", tmp_path / "conversations")
 
     # Create directories
     (tmp_path / "briefs").mkdir()
@@ -40,10 +58,12 @@ def temp_data_dir(tmp_path, monkeypatch):
 def mock_now_nyc(monkeypatch):
     """Mock now_nyc() to return a fixed datetime."""
     import modal_agent
+    from oura_agent import utils
     from zoneinfo import ZoneInfo
 
     fixed_time = datetime(2026, 1, 15, 10, 30, 0, tzinfo=ZoneInfo("America/New_York"))
     monkeypatch.setattr(modal_agent, "now_nyc", lambda: fixed_time)
+    monkeypatch.setattr(utils, "now_nyc", lambda: fixed_time)
     return fixed_time
 
 

@@ -2,38 +2,14 @@
 Oura Daily Optimization Agent
 Runs daily via Modal cron, analyzes Oura data, sends brief to Telegram.
 Uses Claude Opus 4.5 for analysis.
+
+This is the Modal entrypoint. All logic is in the oura_agent package.
 """
 
 import modal
 import os
 import json
-import logging
-import requests
-import base64
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional
-from zoneinfo import ZoneInfo
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-# ============================================================================
-# LOGGING CONFIGURATION
-# ============================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger("oura_agent")
-
-# Timezone for all timestamps
-NYC_TZ = ZoneInfo("America/New_York")
-
-
-def now_nyc() -> datetime:
-    """Get current time in NYC timezone."""
-    return datetime.now(NYC_TZ)
 
 # ============================================================================
 # MODAL CONFIGURATION
@@ -47,7 +23,8 @@ image = (
         "fastapi>=0.100.0",
         "tenacity>=8.2.0",
     )
-    .add_local_dir("prompts", "/root/prompts")  # Include prompt files in image
+    .add_local_dir("prompts", "/root/prompts")
+    .add_local_dir("oura_agent", "/root/oura_agent")
 )
 
 app = modal.App("oura-agent", image=image)
@@ -56,1114 +33,111 @@ app = modal.App("oura-agent", image=image)
 volume = modal.Volume.from_name("oura-health-data", create_if_missing=True)
 
 # ============================================================================
-# CONSTANTS
+# RE-EXPORTS FOR TEST BACKWARD COMPATIBILITY
 # ============================================================================
+# Tests use monkeypatch.setattr(modal_agent, "X", ...) so we need to re-export
+# all functions and constants that tests mock.
 
-DATA_DIR = Path("/data")
-BRIEFS_DIR = DATA_DIR / "briefs"
-RAW_DIR = DATA_DIR / "raw"
-METRICS_DIR = DATA_DIR / "metrics"  # Extracted daily metrics
-INTERVENTIONS_DIR = DATA_DIR / "interventions"
-CONVERSATIONS_DIR = DATA_DIR / "conversations"  # Chat history
-BASELINES_FILE = DATA_DIR / "baselines.json"
-
-OURA_API_BASE = "https://api.ouraring.com/v2/usercollection"
-
-# Claude Opus 4.5 model ID
-CLAUDE_MODEL = "claude-opus-4-5-20251101"
-
-# Data retention windows
-RAW_WINDOW_DAYS = 28      # Keep detailed raw data for 28 days
-BASELINE_WINDOW_DAYS = 60  # Rolling 60-day window for baseline calculation
-
-# ============================================================================
-# PROMPT LOADING
-# ============================================================================
-
-def _get_prompts_dir() -> Path:
-    """Get prompts directory - works both locally and on Modal."""
-    # On Modal, prompts are copied to /root/prompts during image build
-    modal_path = Path("/root/prompts")
-    if modal_path.exists():
-        return modal_path
-    # Locally, prompts are next to this file
-    return Path(__file__).parent / "prompts"
-
-def _load_prompt(name: str) -> str:
-    """Load a prompt from the prompts directory."""
-    prompt_file = _get_prompts_dir() / f"{name}.md"
-    if prompt_file.exists():
-        return prompt_file.read_text()
-    raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
-
-# Load prompts at module level
-SYSTEM_PROMPT = _load_prompt("morning_brief")
-CHAT_SYSTEM_PROMPT = _load_prompt("chat")
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def ensure_directories():
-    """Create data directories if they don't exist."""
-    for dir_path in [BRIEFS_DIR, RAW_DIR, METRICS_DIR, INTERVENTIONS_DIR, CONVERSATIONS_DIR]:
-        dir_path.mkdir(parents=True, exist_ok=True)
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((requests.RequestException, requests.Timeout)),
-    reraise=True
+from oura_agent.config import (
+    DATA_DIR,
+    BRIEFS_DIR,
+    RAW_DIR,
+    METRICS_DIR,
+    INTERVENTIONS_DIR,
+    CONVERSATIONS_DIR,
+    BASELINES_FILE,
+    OURA_API_BASE,
+    CLAUDE_MODEL,
+    RAW_WINDOW_DAYS,
+    BASELINE_WINDOW_DAYS,
+    NYC_TZ,
+    logger,
 )
-def fetch_oura_data(token: str, endpoint: str, start_date: str, end_date: str = None) -> dict:
-    """Fetch data from Oura API with automatic retry on transient failures."""
-    url = f"{OURA_API_BASE}/{endpoint}"
-    params = {"start_date": start_date}
-    if end_date:
-        params["end_date"] = end_date
 
-    response = requests.get(
-        url,
-        headers={"Authorization": f"Bearer {token}"},
-        params=params,
-        timeout=30
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def get_oura_daily_data(token: str, date: str, context_date: str = None) -> dict:
-    """
-    Fetch all relevant Oura data for a given date.
-
-    Note on Oura date conventions:
-    - daily_sleep, daily_readiness: 'day' = the morning you woke up (wake-date)
-    - daily_activity, daily_stress, workout: 'day' = calendar day (context-date)
-    - sleep (detailed): 'day' = the night sleep started
-
-    Args:
-        token: Oura API access token
-        date: The wake-date (date you woke up) for sleep/readiness data
-        context_date: The calendar date for activity/stress/workout (defaults to date if not specified)
-                     For morning briefs, this should typically be yesterday (complete day data)
-
-    So for a brief on Jan 1 at 10 AM, we want:
-    - daily_sleep for Jan 1 (reflects Dec 31 night → Jan 1 morning)
-    - daily_readiness for Jan 1
-    - sleep session that ended on Jan 1 (started Dec 31)
-    - daily_activity for Dec 31 (yesterday - complete day)
-    - daily_stress for Dec 31 (yesterday - complete day)
-    - workouts for Dec 31 (yesterday - complete day)
-    """
-    data = {}
-
-    # Use context_date for activity/stress/workout if provided, otherwise use date
-    activity_date = context_date if context_date else date
-
-    # Calculate date range for sleep endpoint
-    # We need day_before AND day_after because:
-    # - If user goes to bed before midnight on Dec 31, day = Dec 31
-    # - If user goes to bed after midnight (e.g., 3am on Jan 1), day = Jan 1
-    # Oura API end_date is EXCLUSIVE, so we query [day_before, day_after) to get both
-    target = datetime.strptime(date, "%Y-%m-%d")
-    day_before = (target - timedelta(days=1)).strftime("%Y-%m-%d")
-    day_after = (target + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # Wake-date endpoints - fetch for the target date (sleep/readiness)
-    for endpoint in ["daily_sleep", "daily_readiness"]:
-        try:
-            result = fetch_oura_data(token, endpoint, date, date)
-            data[endpoint] = result.get("data", [])
-        except Exception as e:
-            logger.warning(f" Failed to fetch {endpoint}: {e}")
-            data[endpoint] = []
-
-    # Calendar-day endpoints - fetch for activity_date (complete day data)
-    for endpoint in ["daily_activity", "daily_stress"]:
-        try:
-            result = fetch_oura_data(token, endpoint, activity_date, activity_date)
-            data[endpoint] = result.get("data", [])
-        except Exception as e:
-            logger.warning(f" Failed to fetch {endpoint}: {e}")
-            data[endpoint] = []
-
-    # Workouts - fetch for activity_date (complete day data)
-    # Note: Oura API end_date is EXCLUSIVE, so we need activity_date + 1 day
-    try:
-        activity_end = (datetime.strptime(activity_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        result = fetch_oura_data(token, "workout", activity_date, activity_end)
-        data["workouts"] = result.get("data", [])
-    except Exception as e:
-        logger.warning(f" Failed to fetch workouts: {e}")
-        data["workouts"] = []
-
-    # Sleep endpoint: fetch sessions that ended on target date
-    # Query [day_before, day_after) to capture sessions where day = day_before OR day = date
-    try:
-        result = fetch_oura_data(token, "sleep", day_before, day_after)
-        sleep_sessions = result.get("data", [])
-        # Find the sleep session that ended on our target date
-        for session in reversed(sleep_sessions):  # Most recent first
-            bedtime_end = session.get("bedtime_end", "")
-            if date in bedtime_end:
-                data["sleep"] = [session]
-                break
-        if "sleep" not in data:
-            # Fallback: use most recent session
-            data["sleep"] = sleep_sessions[-1:] if sleep_sessions else []
-    except Exception as e:
-        logger.warning(f" Failed to fetch sleep: {e}")
-        data["sleep"] = []
-
-    return data
-
-
-def get_oura_sleep_data(token: str, wake_date: str) -> dict:
-    """
-    Fetch sleep and readiness data for a given wake date.
-
-    Args:
-        token: Oura API access token
-        wake_date: The date you woke up (YYYY-MM-DD)
-
-    Returns:
-        Dict with keys: daily_sleep, daily_readiness, sleep (detailed)
-    """
-    data = {}
-
-    # Calculate date range for sleep endpoint
-    target = datetime.strptime(wake_date, "%Y-%m-%d")
-    day_before = (target - timedelta(days=1)).strftime("%Y-%m-%d")
-    day_after = (target + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # Wake-date endpoints
-    for endpoint in ["daily_sleep", "daily_readiness"]:
-        try:
-            result = fetch_oura_data(token, endpoint, wake_date, wake_date)
-            data[endpoint] = result.get("data", [])
-        except Exception as e:
-            logger.warning(f" Failed to fetch {endpoint}: {e}")
-            data[endpoint] = []
-
-    # Sleep endpoint: fetch sessions that ended on wake_date
-    try:
-        result = fetch_oura_data(token, "sleep", day_before, day_after)
-        sleep_sessions = result.get("data", [])
-        for session in reversed(sleep_sessions):
-            bedtime_end = session.get("bedtime_end", "")
-            if wake_date in bedtime_end:
-                data["sleep"] = [session]
-                break
-        if "sleep" not in data:
-            data["sleep"] = sleep_sessions[-1:] if sleep_sessions else []
-    except Exception as e:
-        logger.warning(f" Failed to fetch sleep: {e}")
-        data["sleep"] = []
-
-    return data
-
-
-def get_oura_activity_data(token: str, activity_date: str) -> dict:
-    """
-    Fetch activity, stress, workouts, and heart rate for a calendar date.
-
-    Args:
-        token: Oura API access token
-        activity_date: The calendar date (YYYY-MM-DD)
-
-    Returns:
-        Dict with keys: daily_activity, daily_stress, workouts, daytime_hr
-    """
-    data = {}
-
-    # Calendar-day endpoints
-    for endpoint in ["daily_activity", "daily_stress"]:
-        try:
-            result = fetch_oura_data(token, endpoint, activity_date, activity_date)
-            data[endpoint] = result.get("data", [])
-        except Exception as e:
-            logger.warning(f" Failed to fetch {endpoint}: {e}")
-            data[endpoint] = []
-
-    # Workouts - Oura API end_date is EXCLUSIVE
-    try:
-        activity_end = (datetime.strptime(activity_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        result = fetch_oura_data(token, "workout", activity_date, activity_end)
-        data["workouts"] = result.get("data", [])
-    except Exception as e:
-        logger.warning(f" Failed to fetch workouts: {e}")
-        data["workouts"] = []
-
-    # Daytime heart rate
-    data["daytime_hr"] = get_oura_heartrate(token, activity_date)
-
-    return data
-
-
-def get_oura_heartrate(token: str, date: str) -> list:
-    """
-    Fetch daytime heart rate data for a date.
-
-    The heartrate endpoint returns 5-minute interval readings throughout the day.
-    We filter to non-sleep readings to get daytime HR.
-
-    Args:
-        token: Oura API access token
-        date: Date in YYYY-MM-DD format
-
-    Returns:
-        List of HR readings with bpm, source, and timestamp
-    """
-    # Query full day using datetime range
-    start_dt = f"{date}T00:00:00+00:00"
-    end_dt = f"{date}T23:59:59+00:00"
-
-    url = f"{OURA_API_BASE}/heartrate"
-    try:
-        response = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            params={"start_datetime": start_dt, "end_datetime": end_dt},
-            timeout=30
-        )
-        response.raise_for_status()
-
-        all_readings = response.json().get("data", [])
-        # Filter to non-sleep readings for daytime HR
-        return [r for r in all_readings if r.get("source") != "sleep"]
-    except Exception as e:
-        logger.warning(f" Failed to fetch heartrate: {e}")
-        return []
-
-
-def _workout_duration_minutes(start_dt: str, end_dt: str) -> int:
-    """Calculate workout duration in minutes from ISO datetime strings."""
-    if not start_dt or not end_dt:
-        return 0
-    try:
-        # Parse ISO format timestamps
-        start = datetime.fromisoformat(start_dt.replace("Z", "+00:00"))
-        end = datetime.fromisoformat(end_dt.replace("Z", "+00:00"))
-        return int((end - start).total_seconds() / 60)
-    except (ValueError, TypeError):
-        return 0
-
-
-def extract_metrics(oura_data: dict) -> dict:
-    """Extract summary metrics from Oura API response (for daily tracking)."""
-    metrics = {}
-
-    # Daily sleep
-    if oura_data.get("daily_sleep"):
-        sleep = oura_data["daily_sleep"][0]
-        metrics["sleep_score"] = sleep.get("score")
-
-    # Detailed sleep (for deep sleep, efficiency, HRV)
-    if oura_data.get("sleep"):
-        sleep_detail = oura_data["sleep"][0]
-        # Duration fields are in seconds, convert to minutes
-        deep_sleep_sec = sleep_detail.get("deep_sleep_duration", 0)
-        light_sleep_sec = sleep_detail.get("light_sleep_duration", 0)
-        rem_sleep_sec = sleep_detail.get("rem_sleep_duration", 0)
-        total_sleep_sec = sleep_detail.get("total_sleep_duration", 0)
-
-        metrics["deep_sleep_minutes"] = deep_sleep_sec // 60 if deep_sleep_sec else None
-        metrics["light_sleep_minutes"] = light_sleep_sec // 60 if light_sleep_sec else None
-        metrics["rem_sleep_minutes"] = rem_sleep_sec // 60 if rem_sleep_sec else None
-        metrics["total_sleep_minutes"] = total_sleep_sec // 60 if total_sleep_sec else None
-        metrics["sleep_efficiency"] = sleep_detail.get("efficiency")
-        metrics["hrv"] = sleep_detail.get("average_hrv")
-        metrics["avg_hr"] = sleep_detail.get("average_heart_rate")
-        metrics["avg_breath"] = sleep_detail.get("average_breath")
-        metrics["latency_minutes"] = sleep_detail.get("latency", 0) // 60 if sleep_detail.get("latency") else None
-        metrics["restless_periods"] = sleep_detail.get("restless_periods")
-
-        # Resting HR: use lowest_heart_rate if available
-        metrics["resting_hr"] = sleep_detail.get("lowest_heart_rate")
-
-    # Readiness
-    if oura_data.get("daily_readiness"):
-        readiness = oura_data["daily_readiness"][0]
-        metrics["readiness"] = readiness.get("score")
-        metrics["temperature_deviation"] = readiness.get("temperature_deviation")
-
-    # Activity
-    if oura_data.get("daily_activity"):
-        activity = oura_data["daily_activity"][0]
-        metrics["activity_score"] = activity.get("score")
-        metrics["steps"] = activity.get("steps")
-
-    # Daily stress (API returns seconds, convert to minutes)
-    if oura_data.get("daily_stress"):
-        stress = oura_data["daily_stress"][0]
-        stress_sec = stress.get("stress_high")
-        recovery_sec = stress.get("recovery_high")
-        metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
-        metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
-        metrics["stress_day_summary"] = stress.get("day_summary")
-
-    # Workouts (aggregate if multiple)
-    if oura_data.get("workouts"):
-        workouts = oura_data["workouts"]
-        metrics["workout_count"] = len(workouts)
-        metrics["workout_calories"] = sum(w.get("calories", 0) or 0 for w in workouts)
-        metrics["workout_minutes"] = sum(
-            _workout_duration_minutes(w.get("start_datetime"), w.get("end_datetime"))
-            for w in workouts
-        )
-        metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
-
-    # Daytime heart rate (passed separately via daytime_hr key)
-    if oura_data.get("daytime_hr"):
-        readings = oura_data["daytime_hr"]
-        if readings:
-            bpms = [r["bpm"] for r in readings if r.get("bpm")]
-            if bpms:
-                metrics["daytime_hr_avg"] = round(sum(bpms) / len(bpms), 1)
-                metrics["daytime_hr_min"] = min(bpms)
-                metrics["daytime_hr_max"] = max(bpms)
-                metrics["daytime_hr_samples"] = len(bpms)
-
-    return metrics
-
-
-def extract_sleep_metrics(oura_data: dict) -> dict:
-    """Extract sleep-related metrics from Oura API response.
-
-    Includes: sleep_score, deep/light/rem/total sleep, efficiency, HRV, HR,
-    breath, latency, restless_periods, resting_hr, readiness, temperature_deviation.
-    """
-    metrics = {}
-
-    # Daily sleep
-    if oura_data.get("daily_sleep"):
-        sleep = oura_data["daily_sleep"][0]
-        metrics["sleep_score"] = sleep.get("score")
-
-    # Detailed sleep (for deep sleep, efficiency, HRV)
-    if oura_data.get("sleep"):
-        sleep_detail = oura_data["sleep"][0]
-        deep_sleep_sec = sleep_detail.get("deep_sleep_duration", 0)
-        light_sleep_sec = sleep_detail.get("light_sleep_duration", 0)
-        rem_sleep_sec = sleep_detail.get("rem_sleep_duration", 0)
-        total_sleep_sec = sleep_detail.get("total_sleep_duration", 0)
-
-        metrics["deep_sleep_minutes"] = deep_sleep_sec // 60 if deep_sleep_sec else None
-        metrics["light_sleep_minutes"] = light_sleep_sec // 60 if light_sleep_sec else None
-        metrics["rem_sleep_minutes"] = rem_sleep_sec // 60 if rem_sleep_sec else None
-        metrics["total_sleep_minutes"] = total_sleep_sec // 60 if total_sleep_sec else None
-        metrics["sleep_efficiency"] = sleep_detail.get("efficiency")
-        metrics["hrv"] = sleep_detail.get("average_hrv")
-        metrics["avg_hr"] = sleep_detail.get("average_heart_rate")
-        metrics["avg_breath"] = sleep_detail.get("average_breath")
-        metrics["latency_minutes"] = sleep_detail.get("latency", 0) // 60 if sleep_detail.get("latency") else None
-        metrics["restless_periods"] = sleep_detail.get("restless_periods")
-        metrics["resting_hr"] = sleep_detail.get("lowest_heart_rate")
-
-    # Readiness
-    if oura_data.get("daily_readiness"):
-        readiness = oura_data["daily_readiness"][0]
-        metrics["readiness"] = readiness.get("score")
-        metrics["temperature_deviation"] = readiness.get("temperature_deviation")
-
-    return metrics
-
-
-def extract_activity_metrics(oura_data: dict) -> dict:
-    """Extract activity-related metrics from Oura API response.
-
-    Includes: activity_score, steps, stress, recovery, workouts, daytime_hr.
-    """
-    metrics = {}
-
-    # Activity
-    if oura_data.get("daily_activity"):
-        activity = oura_data["daily_activity"][0]
-        metrics["activity_score"] = activity.get("score")
-        metrics["steps"] = activity.get("steps")
-
-    # Daily stress (API returns seconds, convert to minutes)
-    if oura_data.get("daily_stress"):
-        stress = oura_data["daily_stress"][0]
-        stress_sec = stress.get("stress_high")
-        recovery_sec = stress.get("recovery_high")
-        metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
-        metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
-        metrics["stress_day_summary"] = stress.get("day_summary")
-
-    # Workouts (aggregate if multiple)
-    if oura_data.get("workouts"):
-        workouts = oura_data["workouts"]
-        metrics["workout_count"] = len(workouts)
-        metrics["workout_calories"] = sum(w.get("calories", 0) or 0 for w in workouts)
-        metrics["workout_minutes"] = sum(
-            _workout_duration_minutes(w.get("start_datetime"), w.get("end_datetime"))
-            for w in workouts
-        )
-        metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
-
-    # Daytime heart rate
-    if oura_data.get("daytime_hr"):
-        readings = oura_data["daytime_hr"]
-        if readings:
-            bpms = [r["bpm"] for r in readings if r.get("bpm")]
-            if bpms:
-                metrics["daytime_hr_avg"] = round(sum(bpms) / len(bpms), 1)
-                metrics["daytime_hr_min"] = min(bpms)
-                metrics["daytime_hr_max"] = max(bpms)
-                metrics["daytime_hr_samples"] = len(bpms)
-
-    return metrics
-
-
-def extract_detailed_sleep(oura_data: dict) -> dict:
-    """Extract detailed sleep data for last night (time series + contributors)."""
-    if not oura_data.get("sleep"):
-        return {}
-
-    sleep = oura_data["sleep"][0]
-
-    detailed = {
-        "bedtime_start": sleep.get("bedtime_start"),
-        "bedtime_end": sleep.get("bedtime_end"),
-        "time_in_bed_minutes": sleep.get("time_in_bed", 0) // 60,
-        "total_sleep_minutes": sleep.get("total_sleep_duration", 0) // 60,
-        "awake_minutes": sleep.get("awake_time", 0) // 60,
-        "latency_minutes": sleep.get("latency", 0) // 60,
-
-        # Sleep stages
-        "deep_sleep_minutes": sleep.get("deep_sleep_duration", 0) // 60,
-        "light_sleep_minutes": sleep.get("light_sleep_duration", 0) // 60,
-        "rem_sleep_minutes": sleep.get("rem_sleep_duration", 0) // 60,
-
-        # Quality metrics
-        "efficiency": sleep.get("efficiency"),
-        "restless_periods": sleep.get("restless_periods"),
-
-        # Vitals
-        "average_hr": sleep.get("average_heart_rate"),
-        "lowest_hr": sleep.get("lowest_heart_rate"),
-        "average_hrv": sleep.get("average_hrv"),
-        "average_breath": sleep.get("average_breath"),
-    }
-
-    # HR time series - extract key stats
-    hr_data = sleep.get("heart_rate", {}).get("items", [])
-    hr_values = [x for x in hr_data if x is not None]
-    if hr_values:
-        detailed["hr_min"] = min(hr_values)
-        detailed["hr_max"] = max(hr_values)
-        detailed["hr_range"] = max(hr_values) - min(hr_values)
-        # First third vs last third (sleep quality indicator)
-        third = len(hr_values) // 3
-        if third > 0:
-            detailed["hr_first_third_avg"] = round(sum(hr_values[:third]) / third, 1)
-            detailed["hr_last_third_avg"] = round(sum(hr_values[-third:]) / third, 1)
-
-    # HRV time series - extract key stats
-    hrv_data = sleep.get("hrv", {}).get("items", [])
-    hrv_values = [x for x in hrv_data if x is not None]
-    if hrv_values:
-        detailed["hrv_min"] = min(hrv_values)
-        detailed["hrv_max"] = max(hrv_values)
-        detailed["hrv_range"] = max(hrv_values) - min(hrv_values)
-        # First third vs last third
-        third = len(hrv_values) // 3
-        if third > 0:
-            detailed["hrv_first_third_avg"] = round(sum(hrv_values[:third]) / third, 1)
-            detailed["hrv_last_third_avg"] = round(sum(hrv_values[-third:]) / third, 1)
-
-    # Sleep phases - decode and summarize
-    sleep_phases = sleep.get("sleep_phase_5_min", "")
-    if sleep_phases:
-        phase_counts = {"deep": 0, "light": 0, "rem": 0, "awake": 0}
-        for phase in sleep_phases:
-            if phase == "1":
-                phase_counts["deep"] += 1
-            elif phase == "2":
-                phase_counts["light"] += 1
-            elif phase == "3":
-                phase_counts["rem"] += 1
-            elif phase == "4":
-                phase_counts["awake"] += 1
-
-        total_phases = sum(phase_counts.values())
-        if total_phases > 0:
-            detailed["deep_sleep_pct"] = round(100 * phase_counts["deep"] / total_phases, 1)
-            detailed["light_sleep_pct"] = round(100 * phase_counts["light"] / total_phases, 1)
-            detailed["rem_sleep_pct"] = round(100 * phase_counts["rem"] / total_phases, 1)
-            detailed["awake_pct"] = round(100 * phase_counts["awake"] / total_phases, 1)
-
-        # Sleep architecture: count transitions
-        transitions = sum(1 for i in range(1, len(sleep_phases)) if sleep_phases[i] != sleep_phases[i-1])
-        detailed["phase_transitions"] = transitions
-
-    # Readiness contributors (if embedded in sleep data)
-    if sleep.get("readiness"):
-        readiness = sleep["readiness"]
-        detailed["readiness_score"] = readiness.get("score")
-        detailed["temperature_deviation"] = readiness.get("temperature_deviation")
-        detailed["temperature_trend"] = readiness.get("temperature_trend_deviation")
-
-        contributors = readiness.get("contributors", {})
-        detailed["contributor_activity_balance"] = contributors.get("activity_balance")
-        detailed["contributor_body_temperature"] = contributors.get("body_temperature")
-        detailed["contributor_hrv_balance"] = contributors.get("hrv_balance")
-        detailed["contributor_previous_day_activity"] = contributors.get("previous_day_activity")
-        detailed["contributor_previous_night"] = contributors.get("previous_night")
-        detailed["contributor_recovery_index"] = contributors.get("recovery_index")
-        detailed["contributor_resting_heart_rate"] = contributors.get("resting_heart_rate")
-        detailed["contributor_sleep_balance"] = contributors.get("sleep_balance")
-
-    return detailed
-
-
-def extract_detailed_workouts(oura_data: dict) -> list:
-    """Extract detailed workout data for yesterday (all sessions with full context)."""
-    if not oura_data.get("workouts"):
-        return []
-
-    detailed_workouts = []
-    for workout in oura_data["workouts"]:
-        detailed = {
-            "activity": workout.get("activity"),
-            "label": workout.get("label"),  # User's custom name if set
-            "intensity": workout.get("intensity"),
-            "start_time": workout.get("start_datetime"),
-            "end_time": workout.get("end_datetime"),
-            "duration_minutes": _workout_duration_minutes(
-                workout.get("start_datetime"),
-                workout.get("end_datetime")
-            ),
-            "calories": workout.get("calories"),
-            "distance_meters": workout.get("distance"),
-            "source": workout.get("source"),  # manual, auto-detected, etc.
-        }
-        detailed_workouts.append(detailed)
-
-    return detailed_workouts
-
-
-def get_default_baselines() -> dict:
-    """Return default baselines with population averages."""
-    return {
-        "last_updated": None,
-        "dates": [],
-        "data_points": 0,
-        "window_days": BASELINE_WINDOW_DAYS,
-        "metrics": {
-            # Sleep metrics
-            "sleep_score": {"mean": 75, "std": 10, "values": []},
-            "hrv": {"mean": 45, "std": 10, "values": []},
-            "deep_sleep_minutes": {"mean": 70, "std": 15, "values": []},
-            "light_sleep_minutes": {"mean": 200, "std": 30, "values": []},
-            "rem_sleep_minutes": {"mean": 90, "std": 20, "values": []},
-            "sleep_efficiency": {"mean": 85, "std": 5, "values": []},
-            "latency_minutes": {"mean": 15, "std": 10, "values": []},
-            "total_sleep_minutes": {"mean": 420, "std": 45, "values": []},
-            # Vitals
-            "resting_hr": {"mean": 55, "std": 5, "values": []},
-            "daytime_hr_avg": {"mean": 70, "std": 8, "values": []},
-            # Recovery
-            "readiness": {"mean": 75, "std": 10, "values": []},
-            "stress_high": {"mean": 60, "std": 30, "values": []},
-            "recovery_high": {"mean": 120, "std": 45, "values": []},
-            # Activity
-            "workout_minutes": {"mean": 30, "std": 20, "values": []},
-            "workout_calories": {"mean": 200, "std": 150, "values": []},
-        }
-    }
-
-
-def load_baselines() -> dict:
-    """
-    Load existing baselines, merging with defaults to handle schema changes.
-
-    This ensures new metrics added to defaults will be available even in
-    existing deployments with persisted baselines.
-    """
-    defaults = get_default_baselines()
-
-    if not BASELINES_FILE.exists():
-        return defaults
-
-    with open(BASELINES_FILE) as f:
-        persisted = json.load(f)
-
-    # Merge: ensure all default metrics exist in persisted baselines
-    # (new metrics get default values, existing metrics keep their data)
-    if "metrics" not in persisted:
-        persisted["metrics"] = {}
-
-    for metric, default_data in defaults["metrics"].items():
-        if metric not in persisted["metrics"]:
-            logger.info(f"Adding new baseline metric: {metric}")
-            persisted["metrics"][metric] = default_data
-
-    return persisted
-
-
-def update_baselines(baselines: dict, new_metrics: dict, date: str, window: int = BASELINE_WINDOW_DAYS) -> dict:
-    """
-    Update rolling baselines with new data.
-
-    If the date already exists, replaces the old values (allows corrections).
-    """
-    import statistics
-
-    # Track which dates we have data for
-    dates_seen = baselines.get("dates", [])
-
-    # If date exists, remove old values before adding new ones (allows corrections)
-    if date in dates_seen:
-        date_index = dates_seen.index(date)
-        logger.info(f"Replacing baseline data for {date} (index {date_index})")
-
-        # Remove old value at this index for each metric
-        for metric in baselines["metrics"]:
-            values = baselines["metrics"][metric].get("values", [])
-            if len(values) > date_index:
-                values.pop(date_index)
-                baselines["metrics"][metric]["values"] = values
-
-        dates_seen.remove(date)
-
-    # Add this date to our tracking
-    dates_seen.append(date)
-    dates_seen = dates_seen[-window:]  # Keep only last N dates
-    baselines["dates"] = dates_seen
-
-    for metric, value in new_metrics.items():
-        if metric in baselines["metrics"] and value is not None:
-            values = baselines["metrics"][metric].get("values", [])
-            values.append(value)
-            # Keep only last N days
-            values = values[-window:]
-            baselines["metrics"][metric]["values"] = values
-
-            if len(values) >= 2:
-                baselines["metrics"][metric]["mean"] = round(statistics.mean(values), 1)
-                baselines["metrics"][metric]["std"] = round(statistics.stdev(values), 1)
-            elif len(values) == 1:
-                baselines["metrics"][metric]["mean"] = values[0]
-                baselines["metrics"][metric]["std"] = 0
-
-    baselines["last_updated"] = now_nyc().isoformat()
-    baselines["data_points"] = len(baselines["metrics"].get("sleep_score", {}).get("values", []))
-
-    return baselines
-
-
-def load_interventions(date: str) -> dict:
-    """
-    Load interventions for a given date. Returns full data structure.
-
-    Supports both JSONL (new format) and JSON (legacy format) for backwards compatibility.
-    """
-    # Try JSONL first (new format)
-    jsonl_file = INTERVENTIONS_DIR / f"{date}.jsonl"
-    if jsonl_file.exists():
-        entries = []
-        with open(jsonl_file) as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError as e:
-                        logger.warning(f" Skipped corrupt line {line_num} in {jsonl_file}: {e}")
-        return {"date": date, "entries": entries}
-
-    # Fall back to JSON (legacy format)
-    json_file = INTERVENTIONS_DIR / f"{date}.json"
-    if json_file.exists():
-        with open(json_file) as f:
-            data = json.load(f)
-            # Migrate old format if needed
-            if "interventions" in data and "entries" not in data:
-                data["entries"] = [
-                    {"time": e.get("timestamp", "").split("T")[1][:5] if "T" in e.get("timestamp", "") else "",
-                     "raw": f"{e.get('name', '')} ({e.get('details', '')})" if e.get('details') else e.get('name', ''),
-                     "cleaned": f"{e.get('name', '')} ({e.get('details', '')})" if e.get('details') else e.get('name', '')}
-                    for e in data["interventions"]
-                ]
-                del data["interventions"]
-            return data
-
-    return {"date": date, "entries": []}
-
-
-def save_interventions(date: str, data: dict):
-    """
-    Save interventions for a given date.
-
-    Writes JSONL format and removes any legacy JSON file.
-    """
-    jsonl_file = INTERVENTIONS_DIR / f"{date}.jsonl"
-    json_file = INTERVENTIONS_DIR / f"{date}.json"
-
-    # Write as JSONL
-    with open(jsonl_file, 'w') as f:
-        for entry in data.get("entries", []):
-            f.write(json.dumps(entry) + "\n")
-
-    # Remove legacy JSON file if it exists (migration complete)
-    if json_file.exists():
-        json_file.unlink()
-
-
-def load_historical_interventions(days: int = 28) -> dict:
-    """Load all interventions from the past N days. Returns {date: {date, entries}}."""
-    interventions_by_date = {}
-    for i in range(days):
-        date = (now_nyc() - timedelta(days=i)).strftime("%Y-%m-%d")
-        data = load_interventions(date)
-        if data.get("entries"):
-            interventions_by_date[date] = data
-    return interventions_by_date
-
-
-def load_historical_metrics(days: int = 28) -> list:
-    """Load extracted metrics from the past N days."""
-    metrics_history = []
-    for i in range(days):
-        date = (now_nyc() - timedelta(days=i)).strftime("%Y-%m-%d")
-        metrics_file = METRICS_DIR / f"{date}.json"
-        if metrics_file.exists():
-            with open(metrics_file) as f:
-                data = json.load(f)
-                metrics_history.append({"date": date, **data})
-    return metrics_history
-
-
-def save_daily_metrics(
-    date: str,
-    metrics: dict = None,
-    detailed_sleep: dict = None,
-    detailed_workouts: list = None,
-    merge: bool = False
-):
-    """Save extracted metrics for a day.
-
-    Args:
-        date: Date string (YYYY-MM-DD)
-        metrics: Summary metrics dict
-        detailed_sleep: Detailed sleep data dict
-        detailed_workouts: List of workout dicts
-        merge: If True, merge with existing file instead of overwriting
-    """
-    metrics_file = METRICS_DIR / f"{date}.json"
-
-    # Load existing data if merging
-    existing_data = {}
-    if merge and metrics_file.exists():
-        try:
-            with open(metrics_file) as f:
-                existing_data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            existing_data = {}
-
-    # Build new data, merging with existing if requested
-    data = {"date": date}
-
-    # Handle summary metrics
-    if metrics is not None:
-        if merge and "summary" in existing_data:
-            merged_summary = existing_data.get("summary", {}).copy()
-            merged_summary.update(metrics)
-            data["summary"] = merged_summary
-        else:
-            data["summary"] = metrics
-    elif "summary" in existing_data:
-        data["summary"] = existing_data["summary"]
-    else:
-        data["summary"] = {}
-
-    # Handle detailed sleep
-    if detailed_sleep is not None:
-        data["detailed_sleep"] = detailed_sleep
-    elif "detailed_sleep" in existing_data:
-        data["detailed_sleep"] = existing_data["detailed_sleep"]
-    else:
-        data["detailed_sleep"] = {}
-
-    # Handle detailed workouts
-    if detailed_workouts is not None:
-        data["detailed_workouts"] = detailed_workouts
-    elif "detailed_workouts" in existing_data:
-        data["detailed_workouts"] = existing_data["detailed_workouts"]
-    else:
-        data["detailed_workouts"] = []
-
-    with open(metrics_file, 'w') as f:
-        json.dump(data, f, indent=2)
-
-
-def load_recent_briefs(days: int = 3) -> list:
-    """Load recent briefs for context."""
-    briefs = []
-    for i in range(1, days + 1):
-        date = (now_nyc() - timedelta(days=i)).strftime("%Y-%m-%d")
-        brief_file = BRIEFS_DIR / f"{date}.md"
-        if brief_file.exists():
-            with open(brief_file) as f:
-                briefs.append({"date": date, "content": f.read()})
-    return briefs
-
-
-def prune_old_data():
-    """Remove data older than retention windows and aggregate into baselines."""
-    cutoff_date = now_nyc() - timedelta(days=RAW_WINDOW_DAYS)
-    cutoff_str = cutoff_date.strftime("%Y-%m-%d")
-
-    pruned_count = 0
-
-    # Prune raw data
-    for raw_file in RAW_DIR.glob("*.json"):
-        file_date = raw_file.stem  # filename without extension
-        if file_date < cutoff_str:
-            raw_file.unlink()
-            pruned_count += 1
-
-    # Prune metrics (but aggregate into baselines first - done separately)
-    for metrics_file in METRICS_DIR.glob("*.json"):
-        file_date = metrics_file.stem
-        if file_date < cutoff_str:
-            metrics_file.unlink()
-
-    # Prune briefs
-    for brief_file in BRIEFS_DIR.glob("*.md"):
-        file_date = brief_file.stem
-        if file_date < cutoff_str:
-            brief_file.unlink()
-
-    # Prune interventions (both JSONL and legacy JSON)
-    for intervention_file in INTERVENTIONS_DIR.glob("*.json*"):
-        file_date = intervention_file.stem
-        if file_date < cutoff_str:
-            intervention_file.unlink()
-
-    # Prune conversation history (messages older than 28 days)
-    prune_conversation_history()
-
-    if pruned_count > 0:
-        logger.info(f"Pruned {pruned_count} files older than {cutoff_str}")
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((requests.RequestException, requests.Timeout)),
-    reraise=True
+from oura_agent.utils import (
+    now_nyc,
+    ensure_directories,
+    prune_old_data,
+    get_latest_brief,
 )
-def _send_telegram_chunk(bot_token: str, chat_id: str, text: str, parse_mode: str = None) -> requests.Response:
-    """Send a single message chunk to Telegram with retry logic."""
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": True
-    }
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
 
-    return requests.post(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        json=payload,
-        timeout=30
-    )
+from oura_agent.prompts import (
+    get_prompts_dir as _get_prompts_dir,
+    load_prompt as _load_prompt,
+    SYSTEM_PROMPT,
+    CHAT_SYSTEM_PROMPT,
+)
 
+from oura_agent.api.oura import (
+    fetch_oura_data,
+    get_oura_daily_data,
+    get_oura_sleep_data,
+    get_oura_activity_data,
+    get_oura_heartrate,
+)
 
-def send_telegram(message: str, bot_token: str, chat_id: str) -> bool:
-    """Send message to Telegram with automatic retry. Returns success status."""
+from oura_agent.extraction.metrics import (
+    extract_metrics,
+    extract_sleep_metrics,
+    extract_activity_metrics,
+    extract_detailed_sleep,
+    extract_detailed_workouts,
+    _workout_duration_minutes,
+)
+
+from oura_agent.storage.baselines import (
+    get_default_baselines,
+    load_baselines,
+    update_baselines,
+)
+
+from oura_agent.storage.interventions import (
+    load_interventions,
+    save_interventions,
+    load_historical_interventions,
+    save_intervention_raw,
+    get_today_interventions,
+    _migrate_json_to_jsonl,
+)
+
+from oura_agent.storage.metrics import (
+    load_historical_metrics,
+    save_daily_metrics,
+    load_recent_briefs,
+)
+
+from oura_agent.storage.conversations import (
+    load_conversation_history,
+    save_conversation_message,
+    prune_conversation_history,
+)
+
+from oura_agent.telegram.client import (
+    send_telegram,
+    download_telegram_photo,
+    _detect_image_mime_type,
+    _send_telegram_chunk,
+)
+
+from oura_agent.claude.handlers import (
+    generate_brief_with_claude,
+    clean_intervention_with_claude,
+    handle_message,
+    format_intervention_response,
+    analyze_photo_with_claude,
+    build_chat_context,
+)
+
+# ============================================================================
+# HELPER FUNCTION FOR VOLUME RELOAD
+# ============================================================================
+
+def _reload_volume():
+    """Reload volume to see latest commits from other containers."""
     try:
-        # Telegram has 4096 char limit
-        chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
-
-        for chunk in chunks:
-            # Try Markdown first, fall back to plain text if parsing fails
-            response = _send_telegram_chunk(bot_token, chat_id, chunk, parse_mode="Markdown")
-
-            # If Markdown parsing fails, retry without parse_mode
-            if not response.ok and "can't parse entities" in response.text:
-                logger.info("Markdown parsing failed, sending as plain text...")
-                response = _send_telegram_chunk(bot_token, chat_id, chunk)
-
-            if not response.ok:
-                logger.error(f"Telegram API error: {response.status_code} - {response.text}")
-                return False
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Telegram send error: {e}")
-        return False
-
-
-def generate_brief_with_claude(
-    api_key: str,
-    today: str,
-    metrics: dict,
-    detailed_sleep: dict,
-    detailed_workouts: list,
-    baselines: dict,
-    historical_metrics: list,
-    historical_interventions: dict,
-    recent_briefs: list
-) -> str:
-    """Use Claude Opus 4.5 to generate the morning brief with verbose context."""
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    # Build comprehensive context for Claude
-    user_prompt = f"""Generate my morning optimization brief for {today}.
-
-═══════════════════════════════════════════════════════════════════════════════
-LAST NIGHT'S DETAILED SLEEP DATA
-═══════════════════════════════════════════════════════════════════════════════
-
-```json
-{json.dumps(detailed_sleep, indent=2)}
-```
-
-Key observations from the data:
-- Bedtime: {detailed_sleep.get('bedtime_start', 'N/A')} → {detailed_sleep.get('bedtime_end', 'N/A')}
-- Time in bed: {detailed_sleep.get('time_in_bed_minutes', 'N/A')} min, actual sleep: {detailed_sleep.get('total_sleep_minutes', 'N/A')} min
-- Sleep stages: Deep {detailed_sleep.get('deep_sleep_pct', 'N/A')}%, Light {detailed_sleep.get('light_sleep_pct', 'N/A')}%, REM {detailed_sleep.get('rem_sleep_pct', 'N/A')}%
-- HR trend: first third avg {detailed_sleep.get('hr_first_third_avg', 'N/A')} → last third avg {detailed_sleep.get('hr_last_third_avg', 'N/A')} bpm
-- HRV trend: first third avg {detailed_sleep.get('hrv_first_third_avg', 'N/A')} → last third avg {detailed_sleep.get('hrv_last_third_avg', 'N/A')} ms
-- Phase transitions (sleep fragmentation indicator): {detailed_sleep.get('phase_transitions', 'N/A')}
-
-═══════════════════════════════════════════════════════════════════════════════
-YESTERDAY'S WORKOUTS
-═══════════════════════════════════════════════════════════════════════════════
-
-"""
-
-    if detailed_workouts:
-        user_prompt += f"```json\n{json.dumps(detailed_workouts, indent=2)}\n```\n\n"
-        total_mins = sum(w.get('duration_minutes', 0) for w in detailed_workouts)
-        total_cals = sum(w.get('calories', 0) or 0 for w in detailed_workouts)
-        activities = [w.get('activity') for w in detailed_workouts if w.get('activity')]
-        user_prompt += f"Summary: {len(detailed_workouts)} workout(s), {total_mins} total minutes, {total_cals} calories\n"
-        user_prompt += f"Activities: {', '.join(activities)}\n"
-        for i, w in enumerate(detailed_workouts, 1):
-            intensity = w.get('intensity', 'unknown')
-            label = f" ({w.get('label')})" if w.get('label') else ""
-            user_prompt += f"  {i}. {w.get('activity')}{label}: {w.get('duration_minutes')}min, {intensity} intensity, {w.get('calories') or 0} cal\n"
-    else:
-        user_prompt += "No workouts recorded yesterday.\n"
-
-    user_prompt += """
-═══════════════════════════════════════════════════════════════════════════════
-TODAY'S SUMMARY METRICS
-═══════════════════════════════════════════════════════════════════════════════
-
-```json
-{json.dumps(metrics, indent=2)}
-```
-
-═══════════════════════════════════════════════════════════════════════════════
-BASELINES (rolling 60-day averages, updated daily)
-═══════════════════════════════════════════════════════════════════════════════
-
-```json
-{json.dumps(baselines.get('metrics', {}), indent=2)}
-```
-Data points in baseline: {baselines.get('data_points', 0)}
-Dates covered: {baselines.get('dates', [])}
-
-═══════════════════════════════════════════════════════════════════════════════
-HISTORICAL METRICS (last 28 days)
-═══════════════════════════════════════════════════════════════════════════════
-
-"""
-
-    if historical_metrics:
-        for day_data in historical_metrics[:28]:  # Ensure max 28 days
-            date = day_data.get('date', 'unknown')
-            summary = day_data.get('summary', {})
-            # Core metrics
-            line = f"\n{date}: Sleep={summary.get('sleep_score', '-')}, Readiness={summary.get('readiness', '-')}, HRV={summary.get('hrv', '-')}, Deep={summary.get('deep_sleep_minutes', '-')}min, RHR={summary.get('resting_hr', '-')}"
-            # Stress/recovery if available
-            if summary.get('stress_high') is not None:
-                line += f", Stress={summary.get('stress_high')}min, Recovery={summary.get('recovery_high', '-')}min"
-            # Workout if available
-            if summary.get('workout_minutes'):
-                line += f", Workout={summary.get('workout_minutes')}min/{summary.get('workout_calories', '-')}cal"
-            # Daytime HR if available
-            if summary.get('daytime_hr_avg'):
-                line += f", DayHR={summary.get('daytime_hr_avg')}bpm"
-            user_prompt += line
-    else:
-        user_prompt += "No historical data available yet (building baseline)."
-
-    user_prompt += """
-
-═══════════════════════════════════════════════════════════════════════════════
-INTERVENTIONS (last 28 days)
-═══════════════════════════════════════════════════════════════════════════════
-
-"""
-
-    if historical_interventions:
-        for date, data in sorted(historical_interventions.items(), reverse=True):
-            entries = data.get("entries", [])
-            for e in entries:
-                # Use cleaned version for analysis, fall back to raw for old entries
-                display = e.get("cleaned", e.get("raw", "unknown"))
-                user_prompt += f"{date}: {display}\n"
-    else:
-        user_prompt += "No interventions logged yet."
-
-    user_prompt += """
-
-═══════════════════════════════════════════════════════════════════════════════
-RECENT BRIEFS (for continuity)
-═══════════════════════════════════════════════════════════════════════════════
-
-"""
-
-    for brief in recent_briefs[:3]:
-        user_prompt += f"\n### {brief['date']}\n{brief['content']}\n"
-
-    if not recent_briefs:
-        user_prompt += "No previous briefs available."
-
-    user_prompt += """
-
-═══════════════════════════════════════════════════════════════════════════════
-YOUR TASK
-═══════════════════════════════════════════════════════════════════════════════
-
-1. Analyze last night's detailed sleep data - look at HR/HRV trends, sleep architecture, timing
-2. Compare today's metrics against 60-day baselines (calculate z-scores where possible)
-3. Look for patterns in the 28-day historical data
-4. Correlate any interventions with outcomes (e.g., did alcohol correlate with poor sleep?)
-5. Generate the brief in the exact format specified in your instructions
-
-Be specific with numbers. Use status emojis: ✅ (normal), ⚠️ (notable deviation), 🔴 (significant concern).
-"""
-
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=16000,
-        thinking={
-            "type": "enabled",
-            "budget_tokens": 10000
-        },
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": user_prompt}
-        ]
-    )
-
-    # Extract text content (skip thinking blocks)
-    for block in response.content:
-        if block.type == "text":
-            return block.text
-    return response.content[-1].text
+        volume.reload()
+    except RuntimeError:
+        pass  # Running locally, not in Modal
 
 
 # ============================================================================
@@ -1200,16 +174,12 @@ def morning_brief():
     try:
         ensure_directories()
 
-        # Calculate dates:
-        # - today: wake-date for sleep/readiness (data for the night that just ended)
-        # - yesterday: calendar date for activity/stress/workout/HR (complete day data)
         yesterday = (now_nyc() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         # === FETCH AND SAVE SLEEP DATA (today's file) ===
         logger.info(f"Fetching sleep data for {today} (wake-date)...")
         sleep_data = get_oura_sleep_data(oura_token, today)
 
-        # Extract and save sleep metrics to today's file
         sleep_metrics = extract_sleep_metrics(sleep_data)
         detailed_sleep = extract_detailed_sleep(sleep_data)
         logger.info(f"Extracted sleep metrics: {len(sleep_metrics)} fields, detailed: {len(detailed_sleep)} fields")
@@ -1221,7 +191,6 @@ def morning_brief():
         logger.info(f"Fetching activity data for {yesterday} (calendar date)...")
         activity_data = get_oura_activity_data(oura_token, yesterday)
 
-        # Extract and save activity metrics to yesterday's file
         activity_metrics = extract_activity_metrics(activity_data)
         detailed_workouts = extract_detailed_workouts(activity_data)
         logger.info(f"Extracted activity metrics: {len(activity_metrics)} fields, workouts: {len(detailed_workouts)}")
@@ -1229,16 +198,14 @@ def morning_brief():
         save_daily_metrics(yesterday, activity_metrics, None, detailed_workouts, merge=True)
         logger.info(f"Saved activity data to metrics/{yesterday}.json")
 
-        # === SAVE RAW DATA (for debugging) ===
-        # Combine both for raw storage
+        # === SAVE RAW DATA ===
         oura_data = {**sleep_data, **activity_data}
         raw_file = RAW_DIR / f"{today}.json"
         with open(raw_file, 'w') as f:
             json.dump(oura_data, f, indent=2)
         logger.info(f"Saved raw data to {raw_file}")
 
-        # === PREPARE COMBINED METRICS FOR BRIEF AND BASELINES ===
-        # Merge sleep + activity metrics for backward compatibility
+        # === PREPARE COMBINED METRICS ===
         metrics = {**sleep_metrics, **activity_metrics}
         logger.info(f"Combined metrics: {metrics}")
 
@@ -1255,7 +222,7 @@ def morning_brief():
 
         logger.info(f"Loaded context: {len(historical_metrics)} days of metrics, {len(historical_interventions)} days with interventions")
 
-        # Generate brief with Claude (verbose context)
+        # Generate brief with Claude
         logger.info("Generating brief with Claude Opus 4.5...")
         brief_content = generate_brief_with_claude(
             anthropic_key,
@@ -1275,13 +242,13 @@ def morning_brief():
             f.write(brief_content)
         logger.info(f"Saved brief to {brief_file}")
 
-        # Update baselines with new data (deduped by date)
+        # Update baselines
         baselines = update_baselines(baselines, metrics, today)
         with open(BASELINES_FILE, 'w') as f:
             json.dump(baselines, f, indent=2)
         logger.info("Updated baselines")
 
-        # Prune old data (older than 28 days)
+        # Prune old data
         prune_old_data()
 
         # Commit volume changes
@@ -1301,7 +268,6 @@ def morning_brief():
         error_msg = f"Morning brief failed: {str(e)}"
         logger.error(f" {error_msg}")
 
-        # Try to send error notification
         if bot_token and chat_id:
             send_telegram(f"*Oura Agent Error*\n\n`{error_msg}`", bot_token, chat_id)
 
@@ -1331,18 +297,13 @@ def run_now():
     volumes={"/data": volume},
 )
 def log_intervention(raw_text: str):
-    """
-    Log an intervention for correlation tracking.
-
-    Usage:
-        modal run modal_agent.py::log_intervention --raw-text "took 2 magnesium capsules"
-    """
+    """Log an intervention for correlation tracking."""
+    _reload_volume()
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     cleaned_text = clean_intervention_with_claude(anthropic_key, raw_text)
     entry = save_intervention_raw(raw_text, cleaned_text)
     volume.commit()
 
-    # Confirm via Telegram
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if bot_token and chat_id:
@@ -1354,14 +315,11 @@ def log_intervention(raw_text: str):
 
 @app.function(volumes={"/data": volume})
 def reset_baselines():
-    """Reset baselines to defaults. Use after polluted data."""
+    """Reset baselines to defaults."""
     ensure_directories()
-
     baselines = get_default_baselines()
-
     with open(BASELINES_FILE, 'w') as f:
         json.dump(baselines, f, indent=2)
-
     volume.commit()
     logger.info("Baselines reset to defaults")
     return baselines
@@ -1369,7 +327,7 @@ def reset_baselines():
 
 @app.function(volumes={"/data": volume})
 def clear_today_interventions():
-    """Clear today's interventions (for removing test data)."""
+    """Clear today's interventions."""
     ensure_directories()
     today = now_nyc().strftime("%Y-%m-%d")
     jsonl_file = INTERVENTIONS_DIR / f"{today}.jsonl"
@@ -1392,17 +350,14 @@ def clear_today_interventions():
 
 @app.function(secrets=[modal.Secret.from_name("oura")])
 def debug_workouts(date: str = None, days_back: int = 7):
-    """Debug: Check Oura API for workouts. Fetches a range to ensure we catch all workouts."""
-    import os
-    from datetime import timedelta
+    """Debug: Check Oura API for workouts."""
+    import requests
 
     if date is None:
         date = now_nyc().strftime("%Y-%m-%d")
 
     token = os.environ.get("OURA_ACCESS_TOKEN")
 
-    # Calculate start date (days_back days ago)
-    # Note: Oura API end_date is EXCLUSIVE, so add 1 day to include today
     end_dt = now_nyc()
     start_dt = end_dt - timedelta(days=days_back)
     start_date = start_dt.strftime("%Y-%m-%d")
@@ -1461,20 +416,12 @@ def view_history(days: int = 7):
 @app.function(
     secrets=[modal.Secret.from_name("oura")],
     volumes={"/data": volume},
-    timeout=600,  # 10 minutes for backfill
+    timeout=600,
 )
 def backfill_history(days: int = 90):
-    """
-    Backfill historical Oura data to bootstrap baselines.
-
-    Pulls N days of historical data, extracts metrics, and populates:
-    - Baselines (60-day rolling averages)
-    - Metrics files for last 28 days
-
-    Usage:
-        modal run modal_agent.py::backfill_history --days 90
-    """
+    """Backfill historical Oura data to bootstrap baselines."""
     import statistics
+    import requests
 
     oura_token = os.environ.get("OURA_ACCESS_TOKEN")
     today = now_nyc()
@@ -1482,14 +429,11 @@ def backfill_history(days: int = 90):
     logger.info(f"Starting backfill for {days} days of history...")
     ensure_directories()
 
-    # Calculate date range
-    # Note: Oura API end_date is EXCLUSIVE, so add 1 day to include today
     start_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
     end_date = (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
     logger.info(f"Fetching data from {start_date} to {end_date} (exclusive)")
 
-    # Fetch all data in batches (Oura API allows date ranges)
     all_daily_sleep = {}
     all_daily_readiness = {}
     all_sleep = {}
@@ -1518,18 +462,15 @@ def backfill_history(days: int = 90):
     except Exception as e:
         logger.info(f"   Error: {e}")
 
-    # Fetch sleep (detailed) - need to handle the date convention
-    # Sleep 'day' = date sleep started, so we query one day earlier
+    # Fetch sleep (detailed)
     logger.info("3. Fetching detailed sleep...")
     sleep_start = (today - timedelta(days=days+1)).strftime("%Y-%m-%d")
     try:
         result = fetch_oura_data(oura_token, "sleep", sleep_start, end_date)
         for item in result.get("data", []):
-            # Index by bedtime_end date (the morning you woke up)
             bedtime_end = item.get("bedtime_end", "")
             if bedtime_end:
                 wake_date = bedtime_end.split("T")[0]
-                # Keep the most recent session for each wake date
                 if wake_date not in all_sleep or bedtime_end > all_sleep[wake_date].get("bedtime_end", ""):
                     all_sleep[wake_date] = item
         logger.info(f"   Got {len(all_sleep)} days")
@@ -1564,11 +505,11 @@ def backfill_history(days: int = 90):
     except Exception as e:
         logger.info(f"   Error: {e}")
 
-    # Fetch daytime heart rate (per-day queries, can be slow)
+    # Fetch daytime heart rate
     all_daytime_hr = {}
-    logger.info("6. Fetching daytime heart rate (this may take a while)...")
+    logger.info("6. Fetching daytime heart rate...")
     hr_success_count = 0
-    for i in range(min(days, RAW_WINDOW_DAYS)):  # Only fetch HR for recent days to save time
+    for i in range(min(days, RAW_WINDOW_DAYS)):
         date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         try:
             readings = get_oura_heartrate(oura_token, date)
@@ -1576,19 +517,18 @@ def backfill_history(days: int = 90):
                 all_daytime_hr[date] = readings
                 hr_success_count += 1
         except Exception:
-            pass  # Silent fail for individual days
+            pass
         if i > 0 and i % 7 == 0:
             logger.info(f"   Processed {i}/{min(days, RAW_WINDOW_DAYS)} days...")
     logger.info(f"   Got heart rate data for {hr_success_count} days")
 
-    # Process each day and extract metrics
+    # Process each day
     logger.info("\n7. Processing daily metrics...")
     all_metrics = {}
 
     for i in range(days):
         date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
 
-        # Build oura_data dict for this day
         oura_data = {
             "daily_sleep": [all_daily_sleep[date]] if date in all_daily_sleep else [],
             "daily_readiness": [all_daily_readiness[date]] if date in all_daily_readiness else [],
@@ -1598,34 +538,29 @@ def backfill_history(days: int = 90):
             "daytime_hr": all_daytime_hr.get(date, []),
         }
 
-        # Extract metrics
         metrics = extract_metrics(oura_data)
 
         if metrics and any(v is not None for v in metrics.values()):
             all_metrics[date] = metrics
 
-            # Save to metrics file if within 28-day window
             if i < RAW_WINDOW_DAYS:
-                detailed_sleep = extract_detailed_sleep(oura_data)
-                detailed_workouts = extract_detailed_workouts(oura_data)
-                save_daily_metrics(date, metrics, detailed_sleep, detailed_workouts)
+                detailed_sleep_data = extract_detailed_sleep(oura_data)
+                detailed_workouts_data = extract_detailed_workouts(oura_data)
+                save_daily_metrics(date, metrics, detailed_sleep_data, detailed_workouts_data)
 
     logger.info(f"   Extracted metrics for {len(all_metrics)} days")
 
-    # Build baselines from all historical data
+    # Build baselines
     logger.info("\n8. Building baselines...")
 
-    # Sort dates oldest first
     sorted_dates = sorted(all_metrics.keys())
 
-    # Initialize baselines
     baselines = {
         "last_updated": now_nyc().isoformat(),
         "dates": [],
         "data_points": 0,
         "window_days": BASELINE_WINDOW_DAYS,
         "metrics": {
-            # Sleep metrics
             "sleep_score": {"mean": 0, "std": 0, "values": []},
             "hrv": {"mean": 0, "std": 0, "values": []},
             "deep_sleep_minutes": {"mean": 0, "std": 0, "values": []},
@@ -1634,28 +569,21 @@ def backfill_history(days: int = 90):
             "sleep_efficiency": {"mean": 0, "std": 0, "values": []},
             "latency_minutes": {"mean": 0, "std": 0, "values": []},
             "total_sleep_minutes": {"mean": 0, "std": 0, "values": []},
-            # Vitals
             "resting_hr": {"mean": 0, "std": 0, "values": []},
             "daytime_hr_avg": {"mean": 0, "std": 0, "values": []},
-            # Recovery
             "readiness": {"mean": 0, "std": 0, "values": []},
             "stress_high": {"mean": 0, "std": 0, "values": []},
             "recovery_high": {"mean": 0, "std": 0, "values": []},
-            # Activity
             "workout_minutes": {"mean": 0, "std": 0, "values": []},
             "workout_calories": {"mean": 0, "std": 0, "values": []},
         }
     }
 
-    # Add each day's metrics to baselines
     for date in sorted_dates:
         metrics = all_metrics[date]
-
-        # Track date
         baselines["dates"].append(date)
         baselines["dates"] = baselines["dates"][-BASELINE_WINDOW_DAYS:]
 
-        # Add values
         for metric, value in metrics.items():
             if metric in baselines["metrics"] and value is not None:
                 values = baselines["metrics"][metric]["values"]
@@ -1663,7 +591,6 @@ def backfill_history(days: int = 90):
                 values = values[-BASELINE_WINDOW_DAYS:]
                 baselines["metrics"][metric]["values"] = values
 
-    # Calculate mean and std for each metric
     for metric, data in baselines["metrics"].items():
         values = data["values"]
         if len(values) >= 2:
@@ -1675,7 +602,6 @@ def backfill_history(days: int = 90):
 
     baselines["data_points"] = len(baselines["dates"])
 
-    # Save baselines
     with open(BASELINES_FILE, 'w') as f:
         json.dump(baselines, f, indent=2)
 
@@ -1699,458 +625,6 @@ def backfill_history(days: int = 90):
 # TELEGRAM BOT WEBHOOK
 # ============================================================================
 
-def _migrate_json_to_jsonl(date: str):
-    """Migrate legacy .json file to .jsonl format if needed."""
-    json_file = INTERVENTIONS_DIR / f"{date}.json"
-    jsonl_file = INTERVENTIONS_DIR / f"{date}.jsonl"
-
-    # Only migrate if .json exists and .jsonl doesn't
-    if json_file.exists() and not jsonl_file.exists():
-        data = load_interventions(date)  # This reads the .json file
-        if data.get("entries"):
-            with open(jsonl_file, 'w') as f:
-                for entry in data["entries"]:
-                    f.write(json.dumps(entry) + "\n")
-            logger.info(f"Migrated {len(data['entries'])} entries from {json_file} to {jsonl_file}")
-        # Remove legacy file after migration
-        json_file.unlink()
-
-
-def clean_intervention_with_claude(api_key: str, raw_text: str) -> str:
-    """Use Claude to clean/normalize intervention text."""
-    import anthropic
-
-    prompt = f"""Clean and normalize this health intervention log entry. Fix typos, remove filler words, standardize format. Keep it brief (under 10 words ideally).
-
-Input: "{raw_text}"
-
-Output only the cleaned text, nothing else."""
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=50,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text.strip().strip('"')
-    except Exception as e:
-        logger.error(f"Error cleaning intervention: {e}")
-        return raw_text  # Fall back to raw if cleaning fails
-
-
-def save_intervention_raw(raw_text: str, cleaned_text: str = None) -> dict:
-    """
-    Save an intervention to today's file using atomic append.
-
-    Uses JSONL (one JSON object per line) for append-only writes.
-    This avoids read-modify-write race conditions with the daily job.
-
-    Args:
-        raw_text: Original user input (kept for audit)
-        cleaned_text: Claude-cleaned version (used for display/analysis)
-    """
-    today = now_nyc().strftime("%Y-%m-%d")
-    time = now_nyc().strftime("%H:%M")
-
-    ensure_directories()
-
-    # Reload volume to see latest commits from other containers
-    # This only works when running inside Modal, skip for local testing
-    try:
-        volume.reload()
-    except RuntimeError:
-        pass  # Running locally, not in Modal
-
-    # Migrate legacy .json to .jsonl if needed (before first write)
-    _migrate_json_to_jsonl(today)
-
-    interventions_file = INTERVENTIONS_DIR / f"{today}.jsonl"
-
-    entry = {
-        "time": time,
-        "raw": raw_text,
-        "cleaned": cleaned_text or raw_text,  # Fall back to raw if no cleaned version
-    }
-
-    # Atomic append - no read required, avoids race conditions
-    with open(interventions_file, 'a') as f:
-        f.write(json.dumps(entry) + "\n")
-
-    return entry
-
-
-def get_today_interventions() -> list:
-    """Get today's logged interventions."""
-    today = now_nyc().strftime("%Y-%m-%d")
-    data = load_interventions(today)
-    return data.get("entries", [])
-
-
-# ============================================================================
-# CONVERSATION STORAGE
-# ============================================================================
-
-def load_conversation_history(limit: int = 20) -> list:
-    """Load recent conversation messages."""
-    ensure_directories()
-
-    try:
-        volume.reload()
-    except RuntimeError:
-        pass  # Running locally
-
-    conv_file = CONVERSATIONS_DIR / "history.jsonl"
-    if not conv_file.exists():
-        return []
-
-    messages = []
-    with open(conv_file) as f:
-        for line in f:
-            if line.strip():
-                try:
-                    messages.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-
-    # Return most recent N messages
-    return messages[-limit:]
-
-
-def save_conversation_message(role: str, content: str):
-    """Append a message to conversation history."""
-    ensure_directories()
-
-    try:
-        volume.reload()
-    except RuntimeError:
-        pass  # Running locally
-
-    conv_file = CONVERSATIONS_DIR / "history.jsonl"
-
-    entry = {
-        "timestamp": now_nyc().isoformat(),
-        "role": role,  # "user" or "assistant"
-        "content": content
-    }
-
-    with open(conv_file, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
-def prune_conversation_history():
-    """Remove messages older than 28 days."""
-    conv_file = CONVERSATIONS_DIR / "history.jsonl"
-    if not conv_file.exists():
-        return
-
-    cutoff = now_nyc() - timedelta(days=RAW_WINDOW_DAYS)
-    kept_messages = []
-
-    with open(conv_file) as f:
-        for line in f:
-            if line.strip():
-                try:
-                    msg = json.loads(line)
-                    # Parse timestamp and compare
-                    ts = datetime.fromisoformat(msg["timestamp"])
-                    if ts >= cutoff:
-                        kept_messages.append(msg)
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    continue
-
-    # Rewrite file with only kept messages
-    with open(conv_file, "w") as f:
-        for msg in kept_messages:
-            f.write(json.dumps(msg) + "\n")
-
-
-# ============================================================================
-# CHAT FUNCTIONALITY
-# ============================================================================
-
-def build_chat_context(baselines: dict, metrics: list, interventions: list, briefs: list) -> str:
-    """Build context string for chat with health data."""
-    lines = []
-
-    # Add current date anchor so Claude can resolve relative dates like "yesterday"
-    today = now_nyc().strftime("%Y-%m-%d")
-    lines.append(f"## Current Date: {today}")
-    lines.append("")
-
-    # Baselines summary
-    if baselines.get("metrics"):
-        lines.append("## Your Baselines (60-day rolling averages)")
-        for metric, data in baselines["metrics"].items():
-            if data.get("mean") is not None:
-                mean = data["mean"]
-                std = data.get("std", 0)
-                lines.append(f"- {metric}: {mean:.1f} ± {std:.1f}")
-        lines.append("")
-
-    # Recent metrics (last 7 days for chat, more concise than brief)
-    if metrics:
-        lines.append("## Recent Daily Metrics (last 7 days)")
-        for day_data in metrics[:7]:
-            date = day_data.get("date", "unknown")
-            summary = day_data.get("summary", {})
-            # Sleep metrics
-            sleep = summary.get("sleep_score", "N/A")
-            hrv = summary.get("hrv", "N/A")
-            readiness = summary.get("readiness", "N/A")
-            deep = summary.get("deep_sleep_minutes", "N/A")
-            rhr = summary.get("resting_hr", "N/A")
-            # Activity metrics
-            workout_mins = summary.get("workout_minutes")
-            workout_cals = summary.get("workout_calories")
-            workout_acts = summary.get("workout_activities", [])
-            stress = summary.get("stress_high")
-            recovery = summary.get("recovery_high")
-            day_hr = summary.get("daytime_hr_avg")
-
-            line = f"- {date}: Sleep {sleep}, HRV {hrv}, Readiness {readiness}, Deep {deep}min, RHR {rhr}"
-            if workout_mins:
-                acts_str = "/".join(workout_acts) if workout_acts else ""
-                line += f", Workout {workout_mins}min/{workout_cals:.0f}cal ({acts_str})" if workout_cals else f", Workout {workout_mins}min ({acts_str})"
-            if stress is not None:
-                line += f", Stress {stress}min"
-            if recovery is not None:
-                line += f", Recovery {recovery}min"
-            if day_hr:
-                line += f", DayHR {day_hr}bpm"
-            lines.append(line)
-        lines.append("")
-
-    # Today's interventions
-    if interventions:
-        lines.append("## Today's Interventions")
-        for entry in interventions:
-            cleaned = entry.get("cleaned", entry.get("raw", "unknown"))
-            time = entry.get("time", "")
-            lines.append(f"- {time}: {cleaned}")
-        lines.append("")
-
-    # Recent briefs (just dates and TL;DR for context)
-    if briefs:
-        lines.append("## Recent Brief Highlights")
-        for brief in briefs[-2:]:
-            date = brief.get("date", "unknown")
-            content = brief.get("content", "")
-            # Extract just the TL;DR section
-            if "*TL;DR*" in content:
-                tldr_start = content.find("*TL;DR*")
-                tldr_end = content.find("*", tldr_start + 7)
-                if tldr_end == -1:
-                    tldr_end = min(tldr_start + 200, len(content))
-                tldr = content[tldr_start:tldr_end].strip()
-                lines.append(f"- {date}: {tldr[:150]}...")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def handle_message(api_key: str, user_message: str) -> str:
-    """Handle any user message - Claude decides if it's an intervention or question.
-
-    If Claude identifies an intervention, it prefixes response with [LOG: description].
-    We parse that, save the intervention, and return the rest of the response.
-    """
-    import anthropic
-    import re
-
-    # Load all available data
-    baselines = load_baselines()
-    historical_metrics = load_historical_metrics(RAW_WINDOW_DAYS)
-    today_interventions = get_today_interventions()
-    recent_briefs = load_recent_briefs(3)
-    conversation_history = load_conversation_history(10)
-
-    # Build context
-    context = build_chat_context(
-        baselines, historical_metrics,
-        today_interventions, recent_briefs
-    )
-
-    # Build messages with conversation history
-    messages = []
-    for msg in conversation_history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    messages.append({"role": "user", "content": user_message})
-
-    # Call Claude
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=500,
-            system=CHAT_SYSTEM_PROMPT + "\n\n## Current Health Data\n" + context,
-            messages=messages
-        )
-
-        assistant_response = response.content[0].text.strip()
-
-        # Check if Claude identified this as an intervention
-        log_match = re.match(r'^\[LOG:\s*(.+?)\]\s*\n?', assistant_response)
-        if log_match:
-            # Extract the cleaned intervention text
-            cleaned_intervention = log_match.group(1).strip()
-            # Remove the [LOG: ...] prefix from the response
-            display_response = assistant_response[log_match.end():].strip()
-            # Save the intervention
-            save_intervention_raw(user_message, cleaned_intervention)
-
-            # Save conversation (without the LOG prefix for cleaner history)
-            save_conversation_message("user", user_message)
-            save_conversation_message("assistant", display_response)
-
-            return display_response
-        else:
-            # Regular question/chat - just save and return
-            save_conversation_message("user", user_message)
-            save_conversation_message("assistant", assistant_response)
-            return assistant_response
-
-    except Exception as e:
-        logger.error(f"Message handling error: {e}")
-        return "Sorry, I couldn't process that. Try again or rephrase."
-
-
-def format_intervention_response(api_key: str, just_logged: str) -> str:
-    """Use Claude to generate a natural acknowledgment with today's summary."""
-    import anthropic
-
-    entries = get_today_interventions()
-
-    if not entries:
-        return "Logged."
-
-    # Build list of today's entries
-    entry_lines = []
-    for e in entries:
-        time = e.get("time", "")
-        raw = e.get("raw", e.get("name", "unknown"))
-        entry_lines.append(f"- {time}: {raw}")
-
-    prompt = f"""Acknowledge this intervention was logged. Then summarize today's interventions naturally in 1-2 sentences.
-
-Just logged: "{just_logged}"
-
-Today's entries:
-{chr(10).join(entry_lines)}
-
-Keep response under 3 lines. No emojis. Be concise."""
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=100,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text.strip()
-    except Exception as e:
-        # Fallback if Claude fails
-        return f"Logged. ({len(entries)} today)"
-
-
-def get_latest_brief() -> str:
-    """Get the most recent morning brief."""
-    ensure_directories()
-    # Only return morning briefs (exclude -evening suffix)
-    briefs = [b for b in BRIEFS_DIR.glob("*.md") if "-evening" not in b.name]
-    if briefs:
-        # Sort by modification time, most recent first
-        briefs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        latest = briefs[0]
-        with open(latest) as f:
-            return f.read()
-    return "No briefs available yet."
-
-
-def download_telegram_photo(bot_token: str, file_id: str) -> bytes:
-    """Download a photo from Telegram using the getFile API."""
-    # Step 1: Get file path from Telegram
-    response = requests.get(
-        f"https://api.telegram.org/bot{bot_token}/getFile",
-        params={"file_id": file_id},
-        timeout=30
-    )
-    response.raise_for_status()
-    file_path = response.json()["result"]["file_path"]
-
-    # Step 2: Download the actual file
-    file_response = requests.get(
-        f"https://api.telegram.org/file/bot{bot_token}/{file_path}",
-        timeout=30
-    )
-    file_response.raise_for_status()
-    return file_response.content
-
-
-def _detect_image_mime_type(image_data: bytes) -> str:
-    """Detect image MIME type from magic bytes."""
-    if image_data[:3] == b'\xff\xd8\xff':
-        return "image/jpeg"
-    elif image_data[:8] == b'\x89PNG\r\n\x1a\n':
-        return "image/png"
-    elif image_data[:6] in (b'GIF87a', b'GIF89a'):
-        return "image/gif"
-    elif image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
-        return "image/webp"
-    # Default to JPEG if unknown (most common from Telegram)
-    return "image/jpeg"
-
-
-def analyze_photo_with_claude(api_key: str, image_data: bytes, caption: str = "") -> str:
-    """Use Claude Vision to analyze a photo and extract intervention details."""
-    import anthropic
-
-    # Detect MIME type from image data
-    media_type = _detect_image_mime_type(image_data)
-
-    # Convert to base64
-    image_base64 = base64.b64encode(image_data).decode("utf-8")
-
-    caption_context = f'\nUser caption: "{caption}"\n\nIMPORTANT: Include EVERYTHING mentioned in the caption, even if not visible in the image.' if caption else ""
-
-    prompt = f"""Extract health interventions from BOTH the image AND the user's caption.
-
-From the image, look for:
-- Supplements/vitamins (name, dosage, quantity)
-- Food/drinks (what it is, portion if visible)
-- Exercise equipment or activity
-- Wellness products (sauna, ice bath, etc.)
-{caption_context}
-
-Respond with a normalized intervention log entry listing ALL items.
-If the caption mentions items not in the image, include them too.
-Keep under 30 words. Use comma-separated format for multiple items.
-If neither image nor caption shows a health intervention, respond with "NOT_AN_INTERVENTION".
-Examples: "Creatine 2 capsules, Neuro-Mag 1 capsule", "Post-workout protein shake", "20 min sauna session"
-"""
-
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=100,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": image_base64,
-                    }
-                },
-                {"type": "text", "text": prompt}
-            ]
-        }]
-    )
-    return response.content[0].text.strip()
-
-
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -2164,20 +638,8 @@ from fastapi.responses import JSONResponse
 )
 @modal.fastapi_endpoint(method="POST")
 async def telegram_webhook(request: Request):
-    """
-    Telegram webhook endpoint for receiving messages.
-
-    Commands:
-        /log <intervention> [details] - Log an intervention
-        /status - Show today's interventions
-        /brief - Show latest brief
-        /help - Show available commands
-
-    Natural language:
-        Any other message is cleaned by Claude and logged.
-        Examples: "just had 2 neuro-mag capsules", "20 min sauna"
-    """
-    # Validate webhook secret (Telegram sends this in header when configured)
+    """Telegram webhook endpoint for receiving messages."""
+    # Validate webhook secret
     webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
     if webhook_secret:
         received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -2189,36 +651,32 @@ async def telegram_webhook(request: Request):
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
 
-    # Parse the incoming update
     body = await request.json()
     message = body.get("message", {})
     text = message.get("text", "")
     sender_chat_id = str(message.get("chat", {}).get("id", ""))
 
-    # Only respond to the configured chat
     if sender_chat_id != chat_id:
         return {"ok": True}
+
+    _reload_volume()
+    ensure_directories()
 
     response_text = None
 
     # Check for photo message
     photo = message.get("photo")
     if photo:
-        # Get largest resolution (last in array)
         file_id = photo[-1]["file_id"]
         caption = message.get("caption", "")
 
         try:
-            # Download photo from Telegram
             image_data = download_telegram_photo(bot_token, file_id)
-
-            # Analyze with Claude Vision
             intervention = analyze_photo_with_claude(anthropic_key, image_data, caption)
 
             if intervention == "NOT_AN_INTERVENTION":
                 response_text = "I couldn't identify a health intervention in that photo. Try adding a caption describing what it is."
             else:
-                # Save like a normal intervention (use intervention as both raw and cleaned)
                 save_intervention_raw(intervention, intervention)
                 volume.commit()
                 response_text = format_intervention_response(anthropic_key, intervention)
@@ -2226,17 +684,14 @@ async def telegram_webhook(request: Request):
             logger.error(f"Photo processing error: {e}")
             response_text = "Sorry, I couldn't process that photo. Try sending a text description instead."
 
-        # Send response and return
         if response_text:
             send_telegram(response_text, bot_token, chat_id)
         return {"ok": True}
 
-    # Ignore empty text messages (but photos handled above)
     if not text.strip():
         return {"ok": True}
 
     if text.startswith("/log"):
-        # Extract everything after /log
         raw_text = text[4:].strip()
         if raw_text:
             cleaned_text = clean_intervention_with_claude(anthropic_key, raw_text)
@@ -2251,7 +706,6 @@ async def telegram_webhook(request: Request):
         if entries:
             lines = ["Today's interventions:"]
             for e in entries:
-                # Show cleaned version, fall back to raw for old entries
                 display_text = e.get("cleaned", e.get("raw", e.get("name", "unknown")))
                 lines.append(f"  • {display_text}")
             response_text = "\n".join(lines)
@@ -2266,7 +720,6 @@ async def telegram_webhook(request: Request):
         jsonl_file = INTERVENTIONS_DIR / f"{today}.jsonl"
         json_file = INTERVENTIONS_DIR / f"{today}.json"
         cleared = False
-        # Clear both formats if they exist
         if jsonl_file.exists():
             jsonl_file.unlink()
             cleared = True
@@ -2297,15 +750,12 @@ Ask questions:
   "Compare today to my baseline" """
 
     elif text.startswith("/"):
-        # Unknown command
         response_text = "Unknown command. Try /help"
 
     else:
-        # Let Claude handle everything - it decides if it's an intervention or question
         response_text = handle_message(anthropic_key, text)
         volume.commit()
 
-    # Send response if we have one
     if response_text:
         send_telegram(response_text, bot_token, chat_id)
 
