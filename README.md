@@ -4,11 +4,39 @@ A personal health optimization agent that analyzes your Oura Ring data and sends
 
 ## Features
 
-- Daily morning briefs at 10 AM EST with sleep analysis and recommendations
-- Compares your metrics against your personal 60-day rolling baselines
-- Natural language intervention logging via Telegram ("took magnesium", "20 min sauna")
-- Tracks correlations between interventions and sleep outcomes
-- Uses Claude Opus 4.5 for intelligent, context-aware analysis
+- **Daily morning briefs** at 10 AM EST with sleep analysis and recommendations
+- **Personal baselines** - compares your metrics against your 60-day rolling averages
+- **Natural language logging** - "took magnesium", "20 min sauna", or send photos
+- **Ask questions** - "How did I sleep last week?", "What's my HRV trend?"
+- **Intervention tracking** - correlates supplements/activities with sleep outcomes
+- **Claude Opus 4.5** with extended thinking for intelligent, context-aware analysis
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| AI Model | Claude Opus 4.5 with extended thinking |
+| Hosting | Modal (serverless) |
+| Data Source | Oura Ring API |
+| Notifications | Telegram Bot |
+| Storage | Modal Volume (encrypted) |
+
+## Project Structure
+
+```
+oura-agent/
+├── modal_agent.py          # Modal entrypoint with decorators
+├── oura_agent/             # Python package
+│   ├── api/                # Oura API client
+│   ├── extraction/         # Metrics extraction
+│   ├── storage/            # Baselines, interventions, conversations
+│   ├── telegram/           # Telegram client
+│   └── claude/             # Claude AI handlers
+├── prompts/                # System prompts
+│   ├── morning_brief.md
+│   └── chat.md
+└── tests/                  # Test suite (98 tests)
+```
 
 ## Prerequisites
 
@@ -22,18 +50,11 @@ A personal health optimization agent that analyzes your Oura Ring data and sends
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/oura-agent.git
-cd oura-agent
+git clone https://github.com/babakd/oura-bot.git
+cd oura-bot
 ```
 
-### 2. Create Your Profile
-
-```bash
-cp profile.example.json profile.json
-# Edit profile.json with your preferences
-```
-
-### 3. Create Telegram Bot
+### 2. Create Telegram Bot
 
 1. Open Telegram and search for `@BotFather`
 2. Send `/newbot` and follow the prompts
@@ -45,14 +66,14 @@ cp profile.example.json profile.json
    ```
    Look for `"chat":{"id":123456789}` in the response
 
-### 4. Get Oura API Token
+### 3. Get Oura API Token
 
 1. Go to [cloud.ouraring.com](https://cloud.ouraring.com)
 2. Navigate to **Personal Access Tokens**
 3. Create a new token with all scopes
 4. Copy the token
 
-### 5. Setup Modal
+### 4. Setup Modal
 
 ```bash
 # Install Modal CLI
@@ -61,7 +82,7 @@ pip install modal
 # Authenticate with Modal
 modal setup
 
-# Create secrets (replace with your actual values)
+# Create secrets
 modal secret create anthropic ANTHROPIC_API_KEY=sk-ant-...
 
 modal secret create oura OURA_ACCESS_TOKEN=...
@@ -72,21 +93,22 @@ modal secret create telegram \
     TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32)
 ```
 
-> **Note**: The webhook secret is used to authenticate incoming requests from Telegram. Save it somewhere—you'll need it when setting up the webhook.
-
-### 6. Deploy
+### 5. Deploy
 
 ```bash
 # Deploy to Modal (starts the daily cron automatically)
 modal deploy modal_agent.py
 
+# Backfill historical data (recommended)
+modal run modal_agent.py::backfill_history --days 90
+
 # Test it immediately
 modal run modal_agent.py
 ```
 
-### 7. Setup Telegram Webhook (for intervention logging)
+### 6. Setup Telegram Webhook
 
-After deploying, set up the webhook so your bot can receive messages. Include the webhook secret for security:
+After deploying, set up the webhook so your bot can receive messages:
 
 ```bash
 curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
@@ -96,8 +118,6 @@ curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
     "secret_token": "<YOUR_WEBHOOK_SECRET>"
   }'
 ```
-
-> **Important**: The `secret_token` must match the `TELEGRAM_WEBHOOK_SECRET` you created in step 5. This prevents unauthorized requests to your webhook.
 
 ## Usage
 
@@ -112,30 +132,44 @@ The agent runs automatically at 10 AM EST every day. You'll receive a Telegram m
 
 ### Logging Interventions
 
-Just message your Telegram bot naturally:
+Message your bot naturally:
 
 ```
 took 400mg magnesium
 20 min sauna session
 had 2 glasses of wine
-late dinner around 10pm
-45 min workout
+45 min strength training
 ```
 
-Or use commands:
+Or send a photo of supplements/food - Claude Vision will extract the details.
+
+### Asking Questions
+
+Ask anything about your health data:
+
+```
+How did I sleep last week?
+What's my HRV trend?
+Compare today to my baseline
+Should I take it easy today?
+```
+
+### Bot Commands
+
 ```
 /status  - Show today's logged interventions
 /brief   - Show the latest morning brief
+/clear   - Clear today's interventions
 /help    - Show available commands
 ```
 
 ### CLI Commands
 
 ```bash
-# Run manually (useful for testing)
+# Run morning brief manually
 modal run modal_agent.py
 
-# Backfill historical data (recommended on first setup)
+# Backfill historical data
 modal run modal_agent.py::backfill_history --days 90
 
 # Reset baselines to defaults
@@ -148,23 +182,15 @@ modal run modal_agent.py::view_history --days 7
 modal app logs oura-agent
 ```
 
-## Configuration
+## Data Retention
 
-### Profile Settings
-
-Edit `profile.json` to customize:
-- Your timezone and sleep targets
-- Communication style preferences
-- Tracked interventions list
-- Primary health goals
-
-### Schedule
-
-The default schedule is 10 AM EST (15:00 UTC). To change it, edit the cron expression in `modal_agent.py`:
-
-```python
-schedule=modal.Cron("0 15 * * *"),  # 15:00 UTC = 10:00 AM EST
-```
+| Data Type | Retention |
+|-----------|-----------|
+| Raw Oura API responses | 28 days |
+| Daily metrics | 28 days |
+| Interventions | 28 days |
+| Conversations | 28 days |
+| Baselines | 60-day rolling |
 
 ## Cost Estimate
 
@@ -175,9 +201,22 @@ schedule=modal.Cron("0 15 * * *"),  # 15:00 UTC = 10:00 AM EST
 ## Data Privacy
 
 - All health data is stored on Modal's encrypted volumes
-- Data never leaves Modal's infrastructure except to Telegram (for notifications)
+- Data never leaves Modal's infrastructure except to Telegram
 - No third-party analytics or tracking
 - Delete all data anytime: `modal volume delete oura-health-data`
+
+## Development
+
+```bash
+# Install dev dependencies
+pip install -r requirements.txt
+
+# Run tests
+pytest tests/ -v
+
+# Deploy
+modal deploy modal_agent.py
+```
 
 ## Troubleshooting
 
@@ -194,8 +233,8 @@ Oura data syncs when you open the app. Make sure to open the Oura app before the
    ```bash
    curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
    ```
-2. Check that your `secret_token` in the webhook matches `TELEGRAM_WEBHOOK_SECRET` in Modal secrets
-3. Check Modal logs for 401 errors: `modal app logs oura-agent`
+2. Check that `secret_token` matches `TELEGRAM_WEBHOOK_SECRET` in Modal secrets
+3. Check Modal logs for 401 errors
 
 ## License
 
