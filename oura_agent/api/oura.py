@@ -94,7 +94,7 @@ def get_oura_daily_data(token: str, date: str, context_date: str = None) -> dict
                 data["sleep"] = [session]
                 break
         if "sleep" not in data:
-            data["sleep"] = sleep_sessions[-1:] if sleep_sessions else []
+            data["sleep"] = []  # No fallback - only use matching session
     except Exception as e:
         logger.warning(f"Failed to fetch sleep: {e}")
         data["sleep"] = []
@@ -139,7 +139,7 @@ def get_oura_sleep_data(token: str, wake_date: str) -> dict:
                 data["sleep"] = [session]
                 break
         if "sleep" not in data:
-            data["sleep"] = sleep_sessions[-1:] if sleep_sessions else []
+            data["sleep"] = []  # No fallback - only use matching session
     except Exception as e:
         logger.warning(f"Failed to fetch sleep: {e}")
         data["sleep"] = []

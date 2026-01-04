@@ -184,6 +184,14 @@ def morning_brief():
         detailed_sleep = extract_detailed_sleep(sleep_data)
         logger.info(f"Extracted sleep metrics: {len(sleep_metrics)} fields, detailed: {len(detailed_sleep)} fields")
 
+        # Check if we actually got sleep data for today (Oura may not have synced yet)
+        if not sleep_data.get("sleep") or not detailed_sleep:
+            error_msg = f"Sleep data for {today} not yet available. Oura may not have synced."
+            logger.warning(error_msg)
+            if bot_token and chat_id:
+                send_telegram(f"⏳ *Morning Brief Delayed*\n\n{error_msg}\n\nPlease sync your Oura ring and the brief will be generated on the next scheduled run.", bot_token, chat_id)
+            return {"status": "delayed", "date": today, "reason": "sleep_data_not_available"}
+
         save_daily_metrics(today, sleep_metrics, detailed_sleep, None, merge=True)
         logger.info(f"Saved sleep data to metrics/{today}.json")
 
