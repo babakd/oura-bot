@@ -189,7 +189,7 @@ def morning_brief():
             error_msg = f"Sleep data for {today} not yet available. Oura may not have synced."
             logger.warning(error_msg)
             if bot_token and chat_id:
-                send_telegram(f"⏳ *Morning Brief Delayed*\n\n{error_msg}\n\nPlease sync your Oura ring and the brief will be generated on the next scheduled run.", bot_token, chat_id)
+                send_telegram(f"⏳ *Morning Brief Delayed*\n\n{error_msg}\n\nPlease sync your Oura ring, then use /regen-brief to generate the brief.", bot_token, chat_id)
             return {"status": "delayed", "date": today, "reason": "sleep_data_not_available"}
 
         save_daily_metrics(today, sleep_metrics, detailed_sleep, None, merge=True)
@@ -641,8 +641,10 @@ from fastapi.responses import JSONResponse
     secrets=[
         modal.Secret.from_name("telegram"),
         modal.Secret.from_name("anthropic"),
+        modal.Secret.from_name("oura"),
     ],
     volumes={"/data": volume},
+    timeout=300,
 )
 @modal.fastapi_endpoint(method="POST")
 async def telegram_webhook(request: Request):
@@ -723,6 +725,15 @@ async def telegram_webhook(request: Request):
     elif text.startswith("/brief"):
         response_text = get_latest_brief()
 
+    elif text.startswith("/regen-brief"):
+        send_telegram("⏳ Regenerating morning brief... This may take a minute.", bot_token, chat_id)
+        try:
+            # Spawn async - return immediately to avoid Telegram webhook timeout/retry
+            morning_brief.spawn()
+            response_text = None  # morning_brief will send the brief when done
+        except Exception as e:
+            response_text = f"❌ Failed to start brief regeneration: {str(e)}"
+
     elif text.startswith("/clear"):
         today = now_nyc().strftime("%Y-%m-%d")
         jsonl_file = INTERVENTIONS_DIR / f"{today}.jsonl"
@@ -744,6 +755,7 @@ async def telegram_webhook(request: Request):
         response_text = """Commands:
 /status - Today's interventions
 /brief - Latest morning brief
+/regen-brief - Regenerate today's brief
 /clear - Clear today's interventions
 /help - Show this
 

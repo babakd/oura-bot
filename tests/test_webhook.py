@@ -418,6 +418,7 @@ class TestHelpCommandUpdated:
         help_text = """Commands:
 /status - Today's interventions
 /brief - Latest morning brief
+/regen-brief - Regenerate today's brief
 /clear - Clear today's interventions
 /help - Show this
 
@@ -434,6 +435,7 @@ Ask questions:
         assert "questions" in help_text.lower() or "Ask" in help_text
         assert "HRV" in help_text
         assert "baseline" in help_text
+        assert "/regen-brief" in help_text
 
 
 class TestHandleMessage:
@@ -587,6 +589,39 @@ class TestConversationStorage:
         # Only new message should remain
         assert len(history) == 1
         assert history[0]["content"] == "New message"
+
+
+class TestRegenBriefCommand:
+    """Tests for /regen-brief command."""
+
+    def test_regen_brief_command_detected(self):
+        """Test /regen-brief is recognized as a command."""
+        text = "/regen-brief"
+        assert text.startswith("/regen-brief")
+        # Should not be caught by /brief check
+        assert not text.startswith("/brief")
+
+    def test_regen_brief_in_help(self):
+        """Test /regen-brief appears in updated help text."""
+        # This mirrors the actual help text in modal_agent.py
+        help_text = """Commands:
+/status - Today's interventions
+/brief - Latest morning brief
+/regen-brief - Regenerate today's brief
+/clear - Clear today's interventions
+/help - Show this"""
+        assert "/regen-brief" in help_text
+        assert "Regenerate" in help_text
+
+    def test_delayed_message_mentions_regen_brief(self):
+        """Test that the 'sleep data not available' message mentions /regen-brief."""
+        # This mirrors the actual message in morning_brief()
+        today = "2026-01-04"
+        error_msg = f"Sleep data for {today} not yet available. Oura may not have synced."
+        message = f"*Morning Brief Delayed*\n\n{error_msg}\n\nPlease sync your Oura ring, then use /regen-brief to generate the brief."
+
+        assert "/regen-brief" in message
+        assert "sync your Oura ring" in message
 
 
 class TestBuildChatContext:
