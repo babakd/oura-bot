@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timedelta
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from oura_agent.config import OURA_API_BASE, logger
+from oura_agent.config import OURA_API_BASE, NYC_TZ, logger
 
 
 @retry(
@@ -193,14 +193,16 @@ def get_oura_heartrate(token: str, date: str) -> list:
 
     Args:
         token: Oura API access token
-        date: Date in YYYY-MM-DD format
+        date: Date in YYYY-MM-DD format (NYC local time)
 
     Returns:
         List of HR readings with bpm, source, and timestamp
     """
-    # Query full day using datetime range
-    start_dt = f"{date}T00:00:00+00:00"
-    end_dt = f"{date}T23:59:59+00:00"
+    # Query full day using NYC timezone datetime range
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    date_nyc = NYC_TZ.localize(date_obj)
+    start_dt = date_nyc.isoformat()
+    end_dt = (date_nyc + timedelta(days=1) - timedelta(seconds=1)).isoformat()
 
     url = f"{OURA_API_BASE}/heartrate"
     try:
