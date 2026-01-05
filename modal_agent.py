@@ -649,13 +649,16 @@ from fastapi.responses import JSONResponse
 @modal.fastapi_endpoint(method="POST")
 async def telegram_webhook(request: Request):
     """Telegram webhook endpoint for receiving messages."""
-    # Validate webhook secret
+    # Validate webhook secret - MANDATORY for security
     webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
-    if webhook_secret:
-        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if received_secret != webhook_secret:
-            logger.warning(f"Webhook auth failed: invalid secret token")
-            return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    if not webhook_secret:
+        logger.error("TELEGRAM_WEBHOOK_SECRET not configured - rejecting request")
+        return JSONResponse({"ok": False, "error": "server misconfigured"}, status_code=500)
+
+    received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if received_secret != webhook_secret:
+        logger.warning("Webhook auth failed: invalid secret token")
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")

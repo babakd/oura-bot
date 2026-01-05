@@ -66,7 +66,15 @@ def download_telegram_photo(bot_token: str, file_id: str) -> bytes:
         timeout=30
     )
     response.raise_for_status()
-    file_path = response.json()["result"]["file_path"]
+
+    # Validate Telegram API response
+    result = response.json()
+    if not result.get("ok"):
+        raise ValueError(f"Telegram API error: {result.get('description', 'unknown error')}")
+
+    file_path = result.get("result", {}).get("file_path")
+    if not file_path:
+        raise ValueError("No file_path in Telegram getFile response")
 
     # Step 2: Download the actual file
     file_response = requests.get(
