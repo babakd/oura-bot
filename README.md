@@ -7,7 +7,7 @@ A personal health optimization agent that analyzes your Oura Ring data and sends
 - **Daily morning briefs** at 10 AM EST with sleep analysis and recommendations
 - **Personal baselines** - compares your metrics against your 60-day rolling averages
 - **Natural language logging** - "took magnesium", "20 min sauna", or send photos
-- **Intelligent chat agent** - ask anything about your health data with full 28-day context
+- **Intelligent chat agent** - ask anything about your health data with full historical context
 - **Intervention tracking** - correlates supplements/activities with sleep outcomes
 - **Claude Opus 4.5** with extended thinking for intelligent, context-aware analysis
 
@@ -24,11 +24,11 @@ The chat agent uses Claude's tool use to dynamically query your health data:
 | `log_intervention` | Log supplements, activities, food |
 | `get_recent_briefs` | Retrieve recent morning briefs |
 
-This means you can ask questions like:
-- "How did I sleep last month?"
-- "Compare my HRV this week vs last week"
-- "What did I log on December 15th?"
-- "Show me my best sleep nights in the past 2 weeks"
+The agent stores your complete health history and can query any date range. Ask questions like:
+- "How has my sleep changed since April?"
+- "Compare my HRV this month vs 6 months ago"
+- "What was my average readiness last summer?"
+- "Show me trends over the past year"
 
 ## Tech Stack
 
@@ -119,8 +119,8 @@ modal secret create telegram \
 # Deploy to Modal (starts the daily cron automatically)
 modal deploy modal_agent.py
 
-# Backfill historical data (recommended)
-modal run modal_agent.py::backfill_history --days 90
+# Backfill historical data (recommended - saves all data for long-term analysis)
+modal run modal_agent.py::backfill_history --days 280  # ~9 months
 
 # Test it immediately
 modal run modal_agent.py
@@ -201,8 +201,8 @@ The agent will show a brief progress message ("📊 Analyzing the month...") whi
 # Run morning brief manually
 modal run modal_agent.py
 
-# Backfill historical data
-modal run modal_agent.py::backfill_history --days 90
+# Backfill historical data (all data saved for long-term queries)
+modal run modal_agent.py::backfill_history --days 280
 
 # Reset baselines to defaults
 modal run modal_agent.py::reset_baselines
@@ -216,13 +216,16 @@ modal app logs oura-agent
 
 ## Data Retention
 
-| Data Type | Retention |
-|-----------|-----------|
-| Raw Oura API responses | 28 days |
-| Daily metrics | 28 days |
-| Interventions | 28 days |
-| Conversations | 28 days |
-| Baselines | 60-day rolling |
+| Data Type | Retention | Purpose |
+|-----------|-----------|---------|
+| Daily metrics | **Unlimited** | Long-term trend analysis |
+| Morning briefs | **Unlimited** | Historical reference |
+| Interventions | **Unlimited** | Correlation analysis |
+| Conversations | 365 days | Chat context |
+| Baselines | 60-day rolling | Personal averages |
+| Raw Oura API responses | 28 days | Redundant with metrics |
+
+**Note:** The morning brief uses the most recent 28 days of data for daily recommendations, but the chat agent can query your entire history for long-term analysis.
 
 ## Cost Estimate
 
