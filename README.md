@@ -1,30 +1,19 @@
-# Oura Daily Optimization Agent
+# Oura Health Agent
 
 A personal health optimization agent that analyzes your Oura Ring data and sends you actionable daily recommendations via Telegram.
 
 ## Features
 
-- **Daily morning briefs** at 10 AM EST with sleep analysis and recommendations
+- **Daily morning briefs** with sleep analysis and recommendations
 - **Personal baselines** - compares your metrics against your 60-day rolling averages
 - **Natural language logging** - "took magnesium", "20 min sauna", or send photos
 - **Intelligent chat agent** - ask anything about your health data with full historical context
 - **Intervention tracking** - correlates supplements/activities with sleep outcomes
 - **Claude Opus 4.5** with extended thinking for intelligent, context-aware analysis
 
-### Chat Agent Capabilities
+###  Agent Capabilities
 
-The chat agent uses Claude's tool use to dynamically query your health data:
-
-| Tool | Description |
-|------|-------------|
-| `get_metrics` | Query daily metrics for any date range |
-| `get_detailed_sleep` | Get detailed sleep data (HR/HRV trends, stages) |
-| `get_interventions` | Query logged interventions by date |
-| `get_baselines` | Get your 60-day rolling averages |
-| `log_intervention` | Log supplements, activities, food |
-| `get_recent_briefs` | Retrieve recent morning briefs |
-
-The agent stores your complete health history and can query any date range. Ask questions like:
+The chat agent uses Claude's tool use to dynamically query your health data: Ask questions like:
 - "How has my sleep changed since April?"
 - "Compare my HRV this month vs 6 months ago"
 - "What was my average readiness last summer?"
@@ -66,6 +55,8 @@ oura-agent/
 4. **Modal account** (free tier works) from [modal.com](https://modal.com)
 
 ## Quick Start
+
+Ask your favorite coding agent to setup this repository for you. Or:
 
 ### 1. Clone the Repository
 
