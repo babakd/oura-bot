@@ -9,8 +9,11 @@ def get_prompts_dir() -> Path:
     """Get prompts directory - works both locally and on Modal."""
     # On Modal, prompts are copied to /root/prompts during image build
     modal_path = Path("/root/prompts")
-    if modal_path.exists():
-        return modal_path
+    try:
+        if modal_path.exists():
+            return modal_path
+    except PermissionError:
+        pass  # Can't access /root on some systems (e.g., CI runners)
     # Locally, prompts are next to modal_agent.py
     local_path = Path(__file__).parent.parent / "prompts"
     if local_path.exists():
