@@ -45,8 +45,8 @@ def temp_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(utils, "INTERVENTIONS_DIR", tmp_path / "interventions")
     monkeypatch.setattr(utils, "CONVERSATIONS_DIR", tmp_path / "conversations")
 
-    # Patch the agent module's config import
-    monkeypatch.setattr(agent, "RAW_WINDOW_DAYS", 28)
+    # Note: agent module no longer uses RAW_WINDOW_DAYS - it loads all available data
+    # and filters by date range in tool execution
 
     # Create directories
     (tmp_path / "briefs").mkdir()

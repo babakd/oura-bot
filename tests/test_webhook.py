@@ -568,14 +568,15 @@ class TestConversationStorage:
         assert history[-1]["content"] == "Message 9"
 
     def test_prune_old_conversations(self, temp_data_dir, monkeypatch):
-        """Test pruning old conversation messages."""
+        """Test pruning old conversation messages (CONVERSATION_WINDOW_DAYS = 365)."""
         import modal_agent
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
         # Create a conversation file with old and new messages
+        # Old message is >365 days old (400 days), new message is current
         conv_file = temp_data_dir / "conversations" / "history.jsonl"
-        old_time = (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=35)).isoformat()
+        old_time = (datetime.now(ZoneInfo("America/New_York")) - timedelta(days=400)).isoformat()
         new_time = datetime.now(ZoneInfo("America/New_York")).isoformat()
 
         with open(conv_file, "w") as f:
@@ -586,7 +587,7 @@ class TestConversationStorage:
 
         history = modal_agent.load_conversation_history()
 
-        # Only new message should remain
+        # Only new message should remain (365-day window)
         assert len(history) == 1
         assert history[0]["content"] == "New message"
 
