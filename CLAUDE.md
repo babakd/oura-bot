@@ -9,6 +9,59 @@ When testing:
 - Do NOT call the production webhook with `/clear`
 - Do NOT delete files from the Modal volume
 
+## Testing Guidelines for Agents
+
+### Running Tests
+
+```bash
+# Run all tests
+python3 -m pytest
+
+# Run with coverage
+python3 -m pytest --cov=oura_agent --cov=modal_agent --cov-report=term-missing
+
+# Run specific test file
+python3 -m pytest tests/test_extraction.py -v
+```
+
+### Test Infrastructure
+
+Tests use fixtures from `tests/conftest.py`:
+
+| Fixture | Purpose |
+|---------|---------|
+| `temp_data_dir` | Redirects all `/data/` paths to temp directory |
+| `mock_now_nyc` | Fixed time: 2026-01-15 10:30:00 EST |
+| `sample_oura_*` | Sample API responses for all Oura endpoints |
+| `sample_baselines` | Pre-populated baseline data |
+| `mock_anthropic_client` | Mock Claude API client |
+
+### Writing New Tests
+
+1. **Always use `temp_data_dir`** - Never touch production data
+2. **Use existing fixtures** from conftest.py for sample data
+3. **Mock external APIs** at the interface level:
+   ```python
+   monkeypatch.setattr(modal_agent, "get_oura_sleep_data", lambda token, date: sample_data)
+   monkeypatch.setattr(modal_agent, "send_telegram", lambda *args: True)
+   ```
+4. **Mock Modal volume** for E2E tests:
+   ```python
+   monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
+   ```
+
+### Test Types
+
+| Type | Location | Coverage |
+|------|----------|----------|
+| Unit tests | `test_extraction.py`, `test_baselines.py` | Pure functions |
+| Integration | `test_webhook.py`, `test_interventions.py` | Multi-component flows |
+| E2E | `test_e2e_brief.py` | Full morning brief pipeline |
+
+### CI/CD
+
+GitHub Actions runs tests on push/PR to main (`.github/workflows/test.yml`). Coverage threshold: 60%.
+
 ## Project Overview
 
 A personal health optimization agent that:
