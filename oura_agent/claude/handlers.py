@@ -260,10 +260,10 @@ def build_chat_context(baselines: dict, metrics: list, interventions: list, brie
             lines.append(f"- {time}: {cleaned}")
         lines.append("")
 
-    # Recent briefs
+    # Recent briefs (briefs are returned newest-first, so take first 2)
     if briefs:
         lines.append("## Recent Brief Highlights")
-        for brief in briefs[-2:]:
+        for brief in briefs[:2]:
             date = brief.get("date", "unknown")
             content = brief.get("content", "")
             if "*TL;DR*" in content:
@@ -288,7 +288,7 @@ def handle_message(api_key: str, user_message: str) -> str:
     historical_metrics = load_historical_metrics(RAW_WINDOW_DAYS)
     today_interventions = get_today_interventions()
     recent_briefs = load_recent_briefs(3)
-    conversation_history = load_conversation_history(10)
+    conversation_history = load_conversation_history(10, today_only=True)
 
     # Build context
     context = build_chat_context(

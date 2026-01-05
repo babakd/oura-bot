@@ -13,24 +13,37 @@ def _ensure_conversations_dir():
     CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_conversation_history(limit: int = 20) -> list:
-    """Load recent conversation messages."""
+def load_conversation_history(limit: int = 20, today_only: bool = False) -> list:
+    """Load recent conversation messages.
+
+    Args:
+        limit: Maximum messages to return
+        today_only: If True, only return messages from today
+    """
+    from oura_agent.utils import now_nyc
+
     _ensure_conversations_dir()
 
     conv_file = CONVERSATIONS_DIR / "history.jsonl"
     if not conv_file.exists():
         return []
 
+    today = now_nyc().strftime("%Y-%m-%d") if today_only else None
+
     messages = []
     with open(conv_file) as f:
         for line in f:
             if line.strip():
                 try:
-                    messages.append(json.loads(line))
+                    msg = json.loads(line)
+                    if today_only:
+                        msg_date = msg.get("timestamp", "")[:10]  # YYYY-MM-DD
+                        if msg_date != today:
+                            continue
+                    messages.append(msg)
                 except json.JSONDecodeError:
                     continue
 
-    # Return most recent N messages
     return messages[-limit:]
 
 
