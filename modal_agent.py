@@ -324,6 +324,45 @@ def log_intervention(raw_text: str):
     return entry
 
 
+@app.function(
+    secrets=[
+        modal.Secret.from_name("telegram"),
+        modal.Secret.from_name("anthropic"),
+    ],
+    volumes={"/data": volume},
+    timeout=300,
+)
+def process_chat_message(text: str):
+    """
+    Process a chat message asynchronously.
+    Called via spawn() from webhook to avoid Telegram timeout.
+    Sends response directly to Telegram when done.
+    """
+    _reload_volume()
+    ensure_directories()
+
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    def send_progress(progress_text: str):
+        send_telegram(progress_text, bot_token, chat_id)
+
+    try:
+        response_text = handle_message_with_agent(
+            anthropic_key,
+            text,
+            send_progress=send_progress
+        )
+        volume.commit()
+
+        if response_text:
+            send_telegram(response_text, bot_token, chat_id)
+    except Exception as e:
+        logger.error(f"Chat processing error: {e}")
+        send_telegram("Sorry, I encountered an error processing your message.", bot_token, chat_id)
+
+
 @app.function(volumes={"/data": volume})
 def reset_baselines():
     """Reset baselines to defaults."""
@@ -780,16 +819,9 @@ Ask questions:
 
     else:
         # Use agent with tools for all messages
-        # Create progress callback to send intermediate status to user
-        def send_progress(text: str):
-            send_telegram(text, bot_token, chat_id)
-
-        response_text = handle_message_with_agent(
-            anthropic_key,
-            text,
-            send_progress=send_progress
-        )
-        volume.commit()
+        # Spawn async to avoid Telegram webhook timeout/retry loop
+        process_chat_message.spawn(text)
+        response_text = None  # Async function will send response when done
 
     if response_text:
         send_telegram(response_text, bot_token, chat_id)
