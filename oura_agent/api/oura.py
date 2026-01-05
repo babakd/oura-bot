@@ -200,7 +200,7 @@ def get_oura_heartrate(token: str, date: str) -> list:
     """
     # Query full day using NYC timezone datetime range
     date_obj = datetime.strptime(date, "%Y-%m-%d")
-    date_nyc = NYC_TZ.localize(date_obj)
+    date_nyc = date_obj.replace(tzinfo=NYC_TZ)
     start_dt = date_nyc.isoformat()
     end_dt = (date_nyc + timedelta(days=1) - timedelta(seconds=1)).isoformat()
 
