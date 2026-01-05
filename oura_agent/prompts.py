@@ -33,7 +33,12 @@ def load_prompt(name: str) -> str:
 try:
     SYSTEM_PROMPT = load_prompt("morning_brief")
     CHAT_SYSTEM_PROMPT = load_prompt("chat")
-except FileNotFoundError:
+except FileNotFoundError as e:
+    # Log critical error - empty prompts will cause garbage output
+    import logging
+    logging.getLogger(__name__).error(
+        f"CRITICAL: Prompts not found: {e}. Agent will produce garbage output!"
+    )
     # Handle case where prompts aren't available (e.g., during testing)
     SYSTEM_PROMPT = ""
     CHAT_SYSTEM_PROMPT = ""
