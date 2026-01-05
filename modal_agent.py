@@ -128,6 +128,8 @@ from oura_agent.claude.handlers import (
     build_chat_context,
 )
 
+from oura_agent.claude.agent import handle_message_with_agent
+
 # ============================================================================
 # HELPER FUNCTION FOR VOLUME RELOAD
 # ============================================================================
@@ -776,7 +778,16 @@ Ask questions:
         response_text = "Unknown command. Try /help"
 
     else:
-        response_text = handle_message(anthropic_key, text)
+        # Use agent with tools for all messages
+        # Create progress callback to send intermediate status to user
+        def send_progress(text: str):
+            send_telegram(text, bot_token, chat_id)
+
+        response_text = handle_message_with_agent(
+            anthropic_key,
+            text,
+            send_progress=send_progress
+        )
         volume.commit()
 
     if response_text:

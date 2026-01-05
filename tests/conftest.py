@@ -20,6 +20,7 @@ def temp_data_dir(tmp_path, monkeypatch):
     from oura_agent import config
     from oura_agent.storage import baselines, interventions, metrics, conversations
     from oura_agent import utils
+    from oura_agent.claude import agent
 
     # Patch all modules that reference these paths
     modules_to_patch = [modal_agent, config]
@@ -44,6 +45,9 @@ def temp_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(utils, "INTERVENTIONS_DIR", tmp_path / "interventions")
     monkeypatch.setattr(utils, "CONVERSATIONS_DIR", tmp_path / "conversations")
 
+    # Patch the agent module's config import
+    monkeypatch.setattr(agent, "RAW_WINDOW_DAYS", 28)
+
     # Create directories
     (tmp_path / "briefs").mkdir()
     (tmp_path / "raw").mkdir()
@@ -59,11 +63,13 @@ def mock_now_nyc(monkeypatch):
     """Mock now_nyc() to return a fixed datetime."""
     import modal_agent
     from oura_agent import utils
+    from oura_agent.claude import agent
     from zoneinfo import ZoneInfo
 
     fixed_time = datetime(2026, 1, 15, 10, 30, 0, tzinfo=ZoneInfo("America/New_York"))
     monkeypatch.setattr(modal_agent, "now_nyc", lambda: fixed_time)
     monkeypatch.setattr(utils, "now_nyc", lambda: fixed_time)
+    monkeypatch.setattr(agent, "now_nyc", lambda: fixed_time)
     return fixed_time
 
 
