@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import anthropic
 
-from oura_agent.config import CLAUDE_MODEL, RAW_WINDOW_DAYS, logger
+from oura_agent.config import CLAUDE_MODEL, logger
 from oura_agent.prompts import load_prompt
 from oura_agent.storage.baselines import load_baselines
 from oura_agent.storage.conversations import (
@@ -143,7 +143,8 @@ def execute_tool(name: str, tool_input: dict) -> str:
     """Execute a tool and return JSON result."""
     try:
         if name == "get_metrics":
-            all_metrics = load_historical_metrics(RAW_WINDOW_DAYS)
+            # Load all available metrics (no day limit)
+            all_metrics = load_historical_metrics()
             start = tool_input["start_date"]
             end = tool_input["end_date"]
             filtered = [
@@ -158,7 +159,8 @@ def execute_tool(name: str, tool_input: dict) -> str:
             return json.dumps(result, indent=2)
 
         elif name == "get_detailed_sleep":
-            all_metrics = load_historical_metrics(RAW_WINDOW_DAYS)
+            # Load all available metrics (no day limit)
+            all_metrics = load_historical_metrics()
             target_date = tool_input["date"]
             for m in all_metrics:
                 if m.get("date") == target_date:
@@ -169,7 +171,8 @@ def execute_tool(name: str, tool_input: dict) -> str:
             return json.dumps({"error": f"No data found for {target_date}"})
 
         elif name == "get_interventions":
-            interventions = load_historical_interventions(RAW_WINDOW_DAYS)
+            # Load all available interventions (no day limit)
+            interventions = load_historical_interventions()
             start = tool_input["start_date"]
             end = tool_input["end_date"]
             filtered = {

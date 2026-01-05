@@ -50,6 +50,7 @@ from oura_agent.config import (
     CLAUDE_MODEL,
     RAW_WINDOW_DAYS,
     BASELINE_WINDOW_DAYS,
+    BRIEF_HISTORY_DAYS,
     NYC_TZ,
     logger,
 )
@@ -225,9 +226,9 @@ def morning_brief():
         # Load baselines (60-day aggregates)
         baselines = load_baselines()
 
-        # Load historical context (28 days)
-        historical_metrics = load_historical_metrics(RAW_WINDOW_DAYS)
-        historical_interventions = load_historical_interventions(RAW_WINDOW_DAYS)
+        # Load historical context for morning brief (28 days - keeps brief focused on recent data)
+        historical_metrics = load_historical_metrics(BRIEF_HISTORY_DAYS)
+        historical_interventions = load_historical_interventions(BRIEF_HISTORY_DAYS)
         recent_briefs = load_recent_briefs(3)
 
         logger.info(f"Loaded context: {len(historical_metrics)} days of metrics, {len(historical_interventions)} days with interventions")
@@ -553,10 +554,10 @@ def backfill_history(days: int = 90):
         if metrics and any(v is not None for v in metrics.values()):
             all_metrics[date] = metrics
 
-            if i < RAW_WINDOW_DAYS:
-                detailed_sleep_data = extract_detailed_sleep(oura_data)
-                detailed_workouts_data = extract_detailed_workouts(oura_data)
-                save_daily_metrics(date, metrics, detailed_sleep_data, detailed_workouts_data)
+            # Save ALL metrics to disk (no longer limited to RAW_WINDOW_DAYS)
+            detailed_sleep_data = extract_detailed_sleep(oura_data)
+            detailed_workouts_data = extract_detailed_workouts(oura_data)
+            save_daily_metrics(date, metrics, detailed_sleep_data, detailed_workouts_data)
 
     logger.info(f"   Extracted metrics for {len(all_metrics)} days")
 
@@ -627,7 +628,7 @@ def backfill_history(days: int = 90):
     return {
         "days_processed": len(all_metrics),
         "baseline_data_points": baselines["data_points"],
-        "metrics_files_saved": min(len(all_metrics), RAW_WINDOW_DAYS)
+        "metrics_files_saved": len(all_metrics)
     }
 
 
