@@ -7,9 +7,28 @@ A personal health optimization agent that analyzes your Oura Ring data and sends
 - **Daily morning briefs** at 10 AM EST with sleep analysis and recommendations
 - **Personal baselines** - compares your metrics against your 60-day rolling averages
 - **Natural language logging** - "took magnesium", "20 min sauna", or send photos
-- **Ask questions** - "How did I sleep last week?", "What's my HRV trend?"
+- **Intelligent chat agent** - ask anything about your health data with full 28-day context
 - **Intervention tracking** - correlates supplements/activities with sleep outcomes
 - **Claude Opus 4.5** with extended thinking for intelligent, context-aware analysis
+
+### Chat Agent Capabilities
+
+The chat agent uses Claude's tool use to dynamically query your health data:
+
+| Tool | Description |
+|------|-------------|
+| `get_metrics` | Query daily metrics for any date range |
+| `get_detailed_sleep` | Get detailed sleep data (HR/HRV trends, stages) |
+| `get_interventions` | Query logged interventions by date |
+| `get_baselines` | Get your 60-day rolling averages |
+| `log_intervention` | Log supplements, activities, food |
+| `get_recent_briefs` | Retrieve recent morning briefs |
+
+This means you can ask questions like:
+- "How did I sleep last month?"
+- "Compare my HRV this week vs last week"
+- "What did I log on December 15th?"
+- "Show me my best sleep nights in the past 2 weeks"
 
 ## Tech Stack
 
@@ -31,11 +50,12 @@ oura-agent/
 │   ├── extraction/         # Metrics extraction
 │   ├── storage/            # Baselines, interventions, conversations
 │   ├── telegram/           # Telegram client
-│   └── claude/             # Claude AI handlers
+│   └── claude/             # Claude AI handlers + agent with tools
 ├── prompts/                # System prompts
-│   ├── morning_brief.md
-│   └── chat.md
-└── tests/                  # Test suite (98 tests)
+│   ├── morning_brief.md    # Morning brief generation
+│   ├── chat.md             # Legacy chat handling
+│   └── agent.md            # Agent with tools for chat interactions
+└── tests/                  # Test suite (134 tests)
 ```
 
 ## Prerequisites
@@ -145,14 +165,26 @@ Or send a photo of supplements/food - Claude Vision will extract the details.
 
 ### Asking Questions
 
-Ask anything about your health data:
+The agent can answer complex questions about your health data by querying the relevant date ranges:
 
 ```
-How did I sleep last week?
-What's my HRV trend?
-Compare today to my baseline
-Should I take it easy today?
+How did I sleep last night?
+What's my HRV trend over the past 2 weeks?
+How did I sleep last month?
+Compare this week to last week
+What correlates with my good sleep nights?
+Show me days where my deep sleep was above average
+What did I log yesterday?
 ```
+
+The agent will show a brief progress message ("📊 Analyzing the month...") while fetching data, then respond with formatted insights.
+
+**Response format:**
+- ✅ Above baseline / good
+- ⚠️ Below baseline / needs attention
+- 🔴 Significantly concerning
+- Bold numbers for key metrics
+- Summaries instead of raw data dumps
 
 ### Bot Commands
 
@@ -195,8 +227,11 @@ modal app logs oura-agent
 ## Cost Estimate
 
 - **Modal**: Free tier includes 30 compute-hours/month (agent uses ~3 hours/month)
-- **Anthropic API**: ~$0.10-0.30/day depending on analysis depth
-- **Total**: ~$3-10/month
+- **Anthropic API**:
+  - Morning briefs: ~$0.10-0.20/day
+  - Chat queries: ~$0.02-0.10 per message (varies by complexity)
+  - Extended thinking adds ~2-3x tokens but improves quality significantly
+- **Total**: ~$5-15/month depending on chat usage
 
 ## Data Privacy
 
