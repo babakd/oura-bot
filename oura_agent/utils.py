@@ -28,7 +28,11 @@ def ensure_directories():
 
 
 def prune_old_data():
-    """Remove data older than retention windows."""
+    """Remove raw API responses older than retention window.
+
+    Only prunes raw API responses - metrics, briefs, interventions, and
+    conversations are kept indefinitely for long-term analysis.
+    """
     # Lazy import to avoid circular dependency
     from oura_agent.storage.conversations import prune_conversation_history
 
@@ -37,36 +41,18 @@ def prune_old_data():
 
     pruned_count = 0
 
-    # Prune raw data
+    # Only prune raw API responses (redundant with extracted metrics)
     for raw_file in RAW_DIR.glob("*.json"):
         file_date = raw_file.stem
         if file_date < cutoff_str:
             raw_file.unlink()
             pruned_count += 1
 
-    # Prune metrics
-    for metrics_file in METRICS_DIR.glob("*.json"):
-        file_date = metrics_file.stem
-        if file_date < cutoff_str:
-            metrics_file.unlink()
-
-    # Prune briefs
-    for brief_file in BRIEFS_DIR.glob("*.md"):
-        file_date = brief_file.stem
-        if file_date < cutoff_str:
-            brief_file.unlink()
-
-    # Prune interventions (both JSONL and legacy JSON)
-    for intervention_file in INTERVENTIONS_DIR.glob("*.json*"):
-        file_date = intervention_file.stem
-        if file_date < cutoff_str:
-            intervention_file.unlink()
-
-    # Prune conversation history
+    # Prune conversation history (uses CONVERSATION_WINDOW_DAYS - 365 days)
     prune_conversation_history()
 
     if pruned_count > 0:
-        logger.info(f"Pruned {pruned_count} files older than {cutoff_str}")
+        logger.info(f"Pruned {pruned_count} raw API files older than {cutoff_str}")
 
 
 def get_latest_brief() -> str:

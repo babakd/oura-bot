@@ -5,7 +5,7 @@ Conversation history storage.
 import json
 from datetime import datetime, timedelta
 
-from oura_agent.config import CONVERSATIONS_DIR, RAW_WINDOW_DAYS, logger
+from oura_agent.config import CONVERSATIONS_DIR, CONVERSATION_WINDOW_DAYS, logger
 
 
 def _ensure_conversations_dir():
@@ -66,14 +66,14 @@ def save_conversation_message(role: str, content: str):
 
 
 def prune_conversation_history():
-    """Remove messages older than 28 days."""
+    """Remove messages older than CONVERSATION_WINDOW_DAYS (365 days)."""
     from oura_agent.utils import now_nyc
 
     conv_file = CONVERSATIONS_DIR / "history.jsonl"
     if not conv_file.exists():
         return
 
-    cutoff = now_nyc() - timedelta(days=RAW_WINDOW_DAYS)
+    cutoff = now_nyc() - timedelta(days=CONVERSATION_WINDOW_DAYS)
     kept_messages = []
 
     with open(conv_file) as f:

@@ -92,10 +92,37 @@ def save_interventions(date: str, data: dict):
         json_file.unlink()
 
 
-def load_historical_interventions(days: int = 28) -> dict:
-    """Load all interventions from the past N days. Returns {date: {date, entries}}."""
+def load_historical_interventions(days: int = None) -> dict:
+    """Load all interventions from the past N days, or all if days=None.
+
+    Args:
+        days: Number of days to load. If None, loads all available interventions.
+
+    Returns:
+        dict: {date: {date, entries}} mapping
+    """
     from oura_agent.utils import now_nyc
 
+    _ensure_interventions_dir()
+
+    if days is None:
+        # Load all available intervention files
+        interventions_by_date = {}
+        for intervention_file in INTERVENTIONS_DIR.glob("*.jsonl"):
+            date = intervention_file.stem
+            data = load_interventions(date)
+            if data.get("entries"):
+                interventions_by_date[date] = data
+        # Also check for legacy .json files
+        for intervention_file in INTERVENTIONS_DIR.glob("*.json"):
+            date = intervention_file.stem
+            if date not in interventions_by_date:
+                data = load_interventions(date)
+                if data.get("entries"):
+                    interventions_by_date[date] = data
+        return interventions_by_date
+
+    # Load specific number of days
     interventions_by_date = {}
     for i in range(days):
         date = (now_nyc() - timedelta(days=i)).strftime("%Y-%m-%d")

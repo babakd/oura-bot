@@ -33,5 +33,7 @@ OURA_API_BASE = "https://api.ouraring.com/v2/usercollection"
 CLAUDE_MODEL = "claude-opus-4-5-20251101"
 
 # Data retention windows
-RAW_WINDOW_DAYS = 28
+RAW_WINDOW_DAYS = 28  # Only used for raw API response pruning
 BASELINE_WINDOW_DAYS = 60
+BRIEF_HISTORY_DAYS = 28  # Days of history to include in morning briefs
+CONVERSATION_WINDOW_DAYS = 365  # Conversation history retention

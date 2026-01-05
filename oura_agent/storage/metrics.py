@@ -18,12 +18,30 @@ def _ensure_briefs_dir():
     BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_historical_metrics(days: int = 28) -> list:
-    """Load extracted metrics from the past N days."""
+def load_historical_metrics(days: int = None) -> list:
+    """Load extracted metrics from the past N days, or all if days=None.
+
+    Args:
+        days: Number of days to load. If None, loads all available metrics.
+    """
     from oura_agent.utils import now_nyc
 
     _ensure_metrics_dir()
 
+    if days is None:
+        # Load all available metrics files
+        metrics_history = []
+        for metrics_file in sorted(METRICS_DIR.glob("*.json"), reverse=True):
+            try:
+                with open(metrics_file) as f:
+                    data = json.load(f)
+                    date = metrics_file.stem  # YYYY-MM-DD from filename
+                    metrics_history.append({"date": date, **data})
+            except (json.JSONDecodeError, IOError):
+                continue
+        return metrics_history
+
+    # Load specific number of days
     metrics_history = []
     for i in range(days):
         date = (now_nyc() - timedelta(days=i)).strftime("%Y-%m-%d")
