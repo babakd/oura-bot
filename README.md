@@ -44,6 +44,8 @@ oura-agent/
 │   ├── morning_brief.md    # Morning brief generation
 │   ├── chat.md             # Legacy chat handling
 │   └── agent.md            # Agent with tools for chat interactions
+├── scripts/                # Utilities
+│   └── setup.py            # Interactive setup wizard
 └── tests/                  # Test suite (134 tests)
 ```
 
@@ -205,10 +207,11 @@ The agent will show a brief progress message ("📊 Analyzing the month...") whi
 ### Bot Commands
 
 ```
-/status  - Show today's logged interventions
-/brief   - Show the latest morning brief
-/clear   - Clear today's interventions
-/help    - Show available commands
+/status      - Show today's logged interventions
+/brief       - Show the latest morning brief
+/regen-brief - Regenerate today's brief (useful if Oura data was delayed)
+/clear       - Clear today's interventions
+/help        - Show available commands
 ```
 
 ### CLI Commands

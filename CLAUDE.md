@@ -203,6 +203,7 @@ Uses JSONL (JSON Lines) format for atomic appends. Each line is a single entry:
 ```
 /status      - Show today's interventions
 /brief       - Show the latest morning brief
+/regen-brief - Regenerate today's brief
 /clear       - Clear today's interventions
 /help        - Show available commands
 ```
