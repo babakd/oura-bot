@@ -704,29 +704,78 @@ Examples:
         print()
         modal_installed, modal_authenticated = check_modal_installed()
 
+        # Offer to install Modal if not present
         if not modal_installed:
-            print_info("Modal CLI not installed")
-            print("To install Modal:")
-            print("  pip install modal")
-            print("  modal setup\n")
-            if confirm("Skip Modal secrets for now?"):
-                pass
+            print_info("Modal CLI is required for cloud deployment.")
+            print()
+            print("Modal is a serverless platform that will host your agent.")
+            print("It runs your code in the cloud and handles scheduling.\n")
+
+            if confirm("Install Modal CLI now?"):
+                print_info("Installing Modal (this may take 30-60 seconds)...")
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "modal"],
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    if result.returncode == 0:
+                        print_success("Modal installed successfully")
+                        modal_installed = True
+                    else:
+                        print_error("Installation failed")
+                        if result.stderr:
+                            print_dim(f"   {result.stderr.strip()[:200]}")
+                except subprocess.TimeoutExpired:
+                    print_error("Installation timed out")
+                except Exception as e:
+                    print_error(f"Installation error: {e}")
             else:
-                print_info("Install Modal and re-run with --update")
-        elif not modal_authenticated:
-            print_info("Modal not authenticated")
-            print("Run: modal setup\n")
-            if confirm("Skip Modal secrets for now?"):
-                pass
+                print_info("Skipping Modal. Run 'pip install modal' later to deploy.")
+
+        # Offer to authenticate if Modal is installed but not authenticated
+        if modal_installed and not modal_authenticated:
+            print()
+            print_info("Modal needs to be authenticated.")
+            print()
+            print("This will open your browser to log in to Modal.")
+            print("After logging in, return here to continue.\n")
+
+            if confirm("Authenticate with Modal now?"):
+                print_info("Opening browser for Modal authentication...")
+                print_dim("   (Complete the login in your browser, then return here)")
+                try:
+                    result = subprocess.run(
+                        ["modal", "setup"],
+                        timeout=300,
+                    )
+                    if result.returncode == 0:
+                        print_success("Modal authenticated successfully")
+                        modal_authenticated = True
+                    else:
+                        print_error("Authentication may have failed")
+                        print_info("You can run 'modal setup' manually later")
+                except subprocess.TimeoutExpired:
+                    print_error("Authentication timed out")
+                except Exception as e:
+                    print_error(f"Authentication error: {e}")
             else:
-                print_info("Authenticate with Modal and re-run with --update")
-        else:
+                print_info("Skipping auth. Run 'modal setup' later to authenticate.")
+
+        # Create secrets if Modal is ready
+        if modal_installed and modal_authenticated:
+            print()
             print_info("Creating Modal secrets...")
             if create_modal_secrets(config):
                 print_success("All Modal secrets created")
             else:
                 print_error("Some secrets failed - check errors above")
                 print_info("You can re-run with --update to retry")
+        elif not args.local_only:
+            print()
+            print_info("Modal not ready - secrets not created")
+            print("Re-run with --update after setting up Modal")
 
     # =========================================================================
     # Stage 7: Deploy (Optional)
