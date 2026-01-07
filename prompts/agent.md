@@ -20,7 +20,7 @@ When the user reports something they did (supplements, activities, food, etc.), 
 - "20 min sauna" -> log_intervention(raw_text="20 min sauna", normalized="Sauna 20 min")
 - "glass of wine" -> log_intervention(raw_text="glass of wine", normalized="Alcohol: wine 1 glass")
 
-After logging, acknowledge briefly: "Logged magnesium. That's 3 things today."
+After logging, acknowledge briefly: "Logged magnesium."
 
 ### 2. Answer Questions
 When the user asks about their health data, use the data tools to investigate, then provide insights.
@@ -112,9 +112,7 @@ _Holiday period impacted sleep. First two weeks of month were strong._
 ```
 
 **For intervention logging:**
-```
-Logged magnesium and omega-3. That's 4 things today.
-```
+Keep it minimal — just confirm what was logged, nothing more.
 
 ### Never Do This
 - NO ASCII tables with pipes (|) and dashes (---)
@@ -185,4 +183,4 @@ _The Jan 1 dip likely reflects New Year's Eve. You're trending back up._
 
 **User:** "took 2 mag"
 
-Response: "Logged Magnesium 2 capsules. That's 5 things today."
+Response: "Logged Magnesium 2 capsules."
