@@ -621,6 +621,9 @@ Examples:
             break
 
     config["TELEGRAM_BOT_TOKEN"] = bot_token
+    # Save bot username if we got it from validation
+    if "bot_info" in dir() and bot_info and bot_info.get("username"):
+        config["_BOT_USERNAME"] = bot_info.get("username")
 
     # =========================================================================
     # Stage 4: Telegram Chat ID
@@ -813,19 +816,53 @@ Examples:
     # Done
     # =========================================================================
     print(f"\n{GREEN}{BOLD}Setup complete!{RESET}")
-    print("\nNext steps:")
+
+    # Get bot username for instructions (saved from Stage 3)
+    bot_username = config.get("_BOT_USERNAME")
 
     if args.local_only:
+        print("\nNext steps:")
         print("  - Your .env file is ready for local development")
         print("  - To deploy to Modal later, run: python scripts/setup.py --update")
     else:
-        print("  - Backfill historical data:")
-        print("    modal run modal_agent.py::backfill_history --days 280")
+        print("\nNext steps:")
+        print("  1. Backfill historical data (recommended):")
+        print("     modal run modal_agent.py::backfill_history --days 365")
         print()
-        print("  - Test immediately:")
-        print("    modal run modal_agent.py")
-        print()
-        print("  - View logs:")
+        print("  2. Test the morning brief:")
+        print("     modal run modal_agent.py")
+
+        # Usage instructions
+        print(f"\n{BOLD}How to use your bot:{RESET}")
+        if bot_username:
+            print(f"  Open Telegram and message @{bot_username}")
+        else:
+            print("  Open Telegram and message your bot")
+
+        print(f"\n  {BOLD}Daily Briefs:{RESET}")
+        print("  Your bot will automatically send a morning brief at 10 AM EST")
+        print("  with sleep analysis, HRV trends, and recommendations.")
+
+        print(f"\n  {BOLD}Log Interventions:{RESET}")
+        print("  Just message naturally:")
+        print("    - took 400mg magnesium")
+        print("    - 20 min sauna")
+        print("    - had 2 glasses of wine")
+        print("  Or send a photo of supplements/food.")
+
+        print(f"\n  {BOLD}Ask Questions:{RESET}")
+        print("  Ask anything about your health data:")
+        print("    - How did I sleep last night?")
+        print("    - What's my HRV trend this week?")
+        print("    - Compare this month to last month")
+
+        print(f"\n  {BOLD}Commands:{RESET}")
+        print("    /status      - Today's logged interventions")
+        print("    /brief       - Show latest morning brief")
+        print("    /regen-brief - Regenerate today's brief")
+        print("    /help        - All commands")
+
+        print(f"\n  {BOLD}View logs:{RESET}")
         print("    modal app logs oura-agent")
 
     print()
