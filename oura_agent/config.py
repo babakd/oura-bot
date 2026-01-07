@@ -3,8 +3,32 @@ Configuration constants and logging setup for Oura Agent.
 """
 
 import logging
+import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+
+def _load_local_env():
+    """Load .env file for local development (skipped on Modal)."""
+    env_file = Path(__file__).parent.parent / ".env"
+    if not env_file.exists():
+        return
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_file)
+    except ImportError:
+        # Manual parsing fallback if python-dotenv not installed
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_local_env()
 
 # Logging configuration
 logging.basicConfig(

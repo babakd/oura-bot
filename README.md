@@ -56,16 +56,42 @@ oura-agent/
 
 ## Quick Start
 
-Ask your favorite coding agent to setup this repository for you. Or:
-
-### 1. Clone the Repository
+### 1. Clone and Install
 
 ```bash
 git clone https://github.com/babakd/oura-bot.git
 cd oura-bot
+pip install -r requirements.txt
 ```
 
-### 2. Create Telegram Bot
+### 2. Run Setup Wizard
+
+```bash
+python scripts/setup.py
+```
+
+The wizard will guide you through:
+- Getting your Anthropic API key
+- Getting your Oura access token
+- Creating your Telegram bot
+- Auto-detecting your Telegram chat ID
+- Generating a secure webhook secret
+- Creating Modal secrets
+- Deploying to Modal
+- Registering the Telegram webhook
+
+### 3. Backfill Historical Data (Recommended)
+
+```bash
+modal run modal_agent.py::backfill_history --days 365  # 1 year
+```
+
+<details>
+<summary><b>Manual Setup (Alternative)</b></summary>
+
+If you prefer manual setup instead of the wizard:
+
+#### Create Telegram Bot
 
 1. Open Telegram and search for `@BotFather`
 2. Send `/newbot` and follow the prompts
@@ -77,14 +103,14 @@ cd oura-bot
    ```
    Look for `"chat":{"id":123456789}` in the response
 
-### 3. Get Oura API Token
+#### Get Oura API Token
 
 1. Go to [cloud.ouraring.com](https://cloud.ouraring.com)
 2. Navigate to **Personal Access Tokens**
 3. Create a new token with all scopes
 4. Copy the token
 
-### 4. Setup Modal
+#### Setup Modal
 
 ```bash
 # Install Modal CLI
@@ -104,20 +130,17 @@ modal secret create telegram \
     TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32)
 ```
 
-### 5. Deploy
+#### Deploy
 
 ```bash
 # Deploy to Modal (starts the daily cron automatically)
 modal deploy modal_agent.py
 
-# Backfill historical data (recommended - saves all data for long-term analysis)
-modal run modal_agent.py::backfill_history --days 280  # ~9 months
-
 # Test it immediately
 modal run modal_agent.py
 ```
 
-### 6. Setup Telegram Webhook
+#### Setup Telegram Webhook
 
 After deploying, set up the webhook so your bot can receive messages:
 
@@ -129,6 +152,8 @@ curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
     "secret_token": "<YOUR_WEBHOOK_SECRET>"
   }'
 ```
+
+</details>
 
 ## Usage
 
