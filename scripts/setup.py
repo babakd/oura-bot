@@ -468,6 +468,266 @@ def get_webhook_info(bot_token: str) -> dict:
 
 
 # ============================================================================
+# SCHEDULE CUSTOMIZATION
+# ============================================================================
+
+# Common US timezones
+TIMEZONES = {
+    "1": ("America/New_York", "Eastern"),
+    "2": ("America/Chicago", "Central"),
+    "3": ("America/Denver", "Mountain"),
+    "4": ("America/Los_Angeles", "Pacific"),
+}
+
+
+def get_timezone() -> Tuple[str, str]:
+    """
+    Ask user for their timezone.
+
+    Returns: (tz_name like "America/New_York", display_name like "Eastern")
+    """
+    print("What timezone are you in?")
+    print("  1. US Eastern (New York)")
+    print("  2. US Central (Chicago)")
+    print("  3. US Mountain (Denver)")
+    print("  4. US Pacific (Los Angeles)")
+    print("  5. Other (enter manually)\n")
+
+    choice = prompt_input("Choose [1-5]", "1")
+
+    if choice in TIMEZONES:
+        return TIMEZONES[choice]
+
+    # Manual entry
+    tz_name = prompt_input("Enter timezone (e.g., Europe/London, Asia/Tokyo)")
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(tz_name)
+        return tz_name, tz_name.split("/")[-1]
+    except Exception:
+        print_error(f"Unknown timezone '{tz_name}', using America/New_York")
+        return "America/New_York", "Eastern"
+
+
+def parse_time_input(time_str: str) -> Optional[Tuple[int, int]]:
+    """
+    Parse various time formats into (hour_24, minute).
+
+    Examples: "7:30 AM" -> (7, 30), "08:00" -> (8, 0), "9 AM" -> (9, 0)
+    """
+    import re
+
+    time_str = time_str.strip().upper()
+
+    # Try "7:30 AM" or "7:30 PM" or "7:30" format
+    match = re.match(r"(\d{1,2}):(\d{2})\s*(AM|PM)?", time_str)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        ampm = match.group(3)
+        if ampm == "PM" and hour != 12:
+            hour += 12
+        elif ampm == "AM" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return (hour, minute)
+
+    # Try "9 AM" or "9AM" format
+    match = re.match(r"(\d{1,2})\s*(AM|PM)", time_str)
+    if match:
+        hour = int(match.group(1))
+        ampm = match.group(2)
+        if ampm == "PM" and hour != 12:
+            hour += 12
+        elif ampm == "AM" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23:
+            return (hour, 0)
+
+    return None
+
+
+def local_to_utc_hour(local_hour: int, local_minute: int, tz_name: str) -> int:
+    """Convert local time to UTC hour using zoneinfo."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    local_tz = ZoneInfo(tz_name)
+    utc_tz = ZoneInfo("UTC")
+
+    # Create a datetime in local timezone
+    local_dt = datetime.now(local_tz).replace(
+        hour=local_hour, minute=local_minute, second=0, microsecond=0
+    )
+    utc_dt = local_dt.astimezone(utc_tz)
+
+    return utc_dt.hour
+
+
+def format_time_display(hour: int, minute: int) -> str:
+    """Format 24-hour time as 12-hour display."""
+    if hour == 0:
+        return f"12:{minute:02d} AM"
+    elif hour < 12:
+        return f"{hour}:{minute:02d} AM"
+    elif hour == 12:
+        return f"12:{minute:02d} PM"
+    else:
+        return f"{hour - 12}:{minute:02d} PM"
+
+
+def get_schedule_preference() -> Tuple[str, str, str]:
+    """
+    Ask user for timezone and preferred morning brief time.
+
+    Returns: (cron_expression, human_readable_time, timezone_name)
+    """
+    print("The morning brief runs automatically every day.\n")
+
+    tz_name, tz_display = get_timezone()
+
+    print(f"\nDefault time: 10:00 AM {tz_display} (after you wake up)\n")
+
+    if confirm(f"Keep the default time (10:00 AM {tz_display})?"):
+        utc_hour = local_to_utc_hour(10, 0, tz_name)
+        return f"0 {utc_hour} * * *", f"10:00 AM {tz_display}", tz_name
+
+    while True:
+        time_input = prompt_input("Enter preferred time (e.g., 7:30 AM, 08:00, 9 AM)")
+
+        parsed = parse_time_input(time_input)
+        if parsed:
+            hour, minute = parsed
+            utc_hour = local_to_utc_hour(hour, minute, tz_name)
+            cron = f"{minute} {utc_hour} * * *"
+            display = format_time_display(hour, minute)
+
+            print_info(f"Setting morning brief to {display} {tz_display} ({utc_hour}:{minute:02d} UTC)")
+            return cron, f"{display} {tz_display}", tz_name
+
+        print_error("Could not parse time. Try formats like: 7:30 AM, 08:00, 9 AM")
+
+
+def update_modal_schedule(cron_expression: str) -> bool:
+    """Update the cron schedule in modal_agent.py before deployment."""
+    import re
+
+    modal_agent_path = PROJECT_ROOT / "modal_agent.py"
+
+    try:
+        content = modal_agent_path.read_text()
+
+        new_content = re.sub(
+            r'schedule=modal\.Cron\("[^"]+"\)',
+            f'schedule=modal.Cron("{cron_expression}")',
+            content,
+        )
+
+        if new_content != content:
+            modal_agent_path.write_text(new_content)
+            return True
+        return False
+    except Exception as e:
+        print_error(f"Could not update schedule: {e}")
+        return False
+
+
+# ============================================================================
+# BACKFILL AND TESTING
+# ============================================================================
+
+
+def parse_backfill_output(output: str) -> int:
+    """Parse backfill output to get number of days processed."""
+    import re
+
+    # Look for "Extracted metrics for X days" or "X data points"
+    match = re.search(r"Extracted metrics for (\d+) days", output)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"(\d+) data points", output)
+    if match:
+        return int(match.group(1))
+
+    # Look for "days_processed": X in JSON output
+    match = re.search(r'"days_processed":\s*(\d+)', output)
+    if match:
+        return int(match.group(1))
+
+    return 0
+
+
+def run_backfill(days: int = 365) -> Tuple[bool, str, int]:
+    """
+    Run backfill_history via Modal CLI.
+
+    Returns: (success, message, days_processed)
+    """
+    print_info(f"Backfilling {days} days of historical data...")
+    print_dim("   This may take 2-5 minutes depending on how much data you have")
+
+    try:
+        result = subprocess.run(
+            ["modal", "run", f"modal_agent.py::backfill_history", "--days", str(days)],
+            capture_output=True,
+            text=True,
+            timeout=900,  # 15 minutes max
+            cwd=PROJECT_ROOT,
+        )
+
+        output = result.stdout + result.stderr
+        days_processed = parse_backfill_output(output)
+
+        if result.returncode == 0:
+            if days_processed > 0:
+                return True, "Backfill complete", days_processed
+            else:
+                return True, "Backfill complete (could not determine days)", 0
+        else:
+            if "No Oura data" in output or "no data" in output.lower():
+                return False, "No Oura data found for the requested period", 0
+            error_msg = result.stderr[:200] if result.stderr else "Unknown error"
+            return False, f"Backfill failed: {error_msg}", days_processed
+
+    except subprocess.TimeoutExpired:
+        return False, "Backfill timed out (took longer than 15 minutes)", 0
+    except Exception as e:
+        return False, f"Error running backfill: {e}", 0
+
+
+def run_morning_brief() -> Tuple[bool, str]:
+    """
+    Run morning_brief via Modal CLI.
+
+    Returns: (success, message)
+    """
+    print_info("Generating morning brief...")
+    print_dim("   This may take 30-60 seconds")
+
+    try:
+        result = subprocess.run(
+            ["modal", "run", "modal_agent.py"],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minutes max
+            cwd=PROJECT_ROOT,
+        )
+
+        if result.returncode == 0:
+            return True, "Morning brief sent! Check your Telegram."
+        else:
+            error_msg = result.stderr[:200] if result.stderr else "Unknown error"
+            return False, f"Failed to generate brief: {error_msg}"
+
+    except subprocess.TimeoutExpired:
+        return False, "Brief generation timed out"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+
+# ============================================================================
 # MAIN WIZARD
 # ============================================================================
 
@@ -780,67 +1040,66 @@ Examples:
             print_info("Modal not ready - secrets not created")
             print("Re-run with --update after setting up Modal")
 
+        # Configure schedule before deployment
+        schedule_time = None
+        if modal_installed and modal_authenticated and not args.skip_deploy:
+            print()
+            cron_expr, schedule_time, tz_name = get_schedule_preference()
+            update_modal_schedule(cron_expr)
+            config["_SCHEDULE_TIME"] = schedule_time
+            config["_TIMEZONE"] = tz_name
+
     # =========================================================================
-    # Stage 7: Deploy (Optional)
+    # Stage 7: Deploy and Setup
     # =========================================================================
+    deployed = False
     if not args.local_only and not args.skip_deploy:
         print_stage(7, "Deploy to Modal")
 
         modal_installed, modal_authenticated = check_modal_installed()
         if modal_installed and modal_authenticated:
-            if confirm("Deploy to Modal now?"):
-                success, webhook_url = deploy_to_modal()
+            print_info("Deploying to Modal...")
+            success, webhook_url = deploy_to_modal()
 
-                if success and webhook_url:
-                    print()
-                    if confirm("Register webhook with Telegram?"):
-                        if register_telegram_webhook(
-                            bot_token, webhook_url, webhook_secret
-                        ):
-                            info = get_webhook_info(bot_token)
-                            if info.get("url"):
-                                print_success(f"Webhook active: {info.get('url')}")
-                elif success:
+            if success:
+                deployed = True
+                if webhook_url:
+                    print_info("Registering webhook with Telegram...")
+                    if register_telegram_webhook(bot_token, webhook_url, webhook_secret):
+                        info = get_webhook_info(bot_token)
+                        if info.get("url"):
+                            print_success(f"Webhook active: {info.get('url')}")
+                else:
                     print_info("Deployment succeeded but webhook URL not detected")
-                    print("Register webhook manually:")
-                    print(f'  curl -X POST "https://api.telegram.org/bot{bot_token}/setWebhook" \\')
-                    print('    -H "Content-Type: application/json" \\')
-                    print("    -d '{")
-                    print('      "url": "YOUR_MODAL_WEBHOOK_URL",')
-                    print(f'      "secret_token": "{webhook_secret}"')
-                    print("    }'")
+                    print_info("You may need to register the webhook manually")
         else:
             print_info("Skipping deployment - Modal not available")
 
     # =========================================================================
-    # Done
+    # Stage 8: Getting Started
     # =========================================================================
-    print(f"\n{GREEN}{BOLD}Setup complete!{RESET}")
-
-    # Get bot username for instructions (saved from Stage 3)
     bot_username = config.get("_BOT_USERNAME")
+    schedule_time = config.get("_SCHEDULE_TIME", "10:00 AM")
 
     if args.local_only:
-        print("\nNext steps:")
-        print("  - Your .env file is ready for local development")
-        print("  - To deploy to Modal later, run: python scripts/setup.py --update")
-    else:
-        print("\nNext steps:")
-        print("  1. Backfill historical data (recommended):")
-        print("     modal run modal_agent.py::backfill_history --days 365")
+        print(f"\n{GREEN}{BOLD}Setup complete!{RESET}")
+        print("\nYour .env file is ready for local development.")
+        print("To deploy to Modal later, run: python scripts/setup.py --update")
         print()
-        print("  2. Test the morning brief:")
-        print("     modal run modal_agent.py")
+        return
+
+    if deployed:
+        print_stage(8, "Getting Started")
 
         # Usage instructions
-        print(f"\n{BOLD}How to use your bot:{RESET}")
+        print(f"{BOLD}How to use your bot:{RESET}")
         if bot_username:
             print(f"  Open Telegram and message @{bot_username}")
         else:
             print("  Open Telegram and message your bot")
 
         print(f"\n  {BOLD}Daily Briefs:{RESET}")
-        print("  Your bot will automatically send a morning brief at 10 AM EST")
+        print(f"  Your bot will automatically send a morning brief at {schedule_time}")
         print("  with sleep analysis, HRV trends, and recommendations.")
 
         print(f"\n  {BOLD}Log Interventions:{RESET}")
@@ -862,8 +1121,41 @@ Examples:
         print("    /regen-brief - Regenerate today's brief")
         print("    /help        - All commands")
 
-        print(f"\n  {BOLD}View logs:{RESET}")
-        print("    modal app logs oura-agent")
+        # Backfill prompt
+        print()
+        print("-" * 50)
+        print()
+        print("For the best experience, we recommend loading your historical data.")
+        print("This helps establish your personal baselines and identify trends.\n")
+
+        if confirm("Backfill 1 year of historical data?"):
+            success, message, days = run_backfill(days=365)
+            if success:
+                if days > 0:
+                    print_success(f"Loaded {days} days of data")
+                else:
+                    print_success("Backfill complete")
+                print_info("Your baselines are ready!")
+            else:
+                print_error(message)
+                if days > 0:
+                    print_info(f"Partial data loaded: {days} days")
+
+        # Test brief prompt
+        print()
+        if confirm("Generate a test morning brief now?"):
+            success, message = run_morning_brief()
+            if success:
+                print_success(message)
+            else:
+                print_error(message)
+
+    # Final message
+    print(f"\n{GREEN}{BOLD}Setup complete!{RESET}")
+
+    if not deployed:
+        print("\nDeployment was skipped. To complete setup later:")
+        print("  python scripts/setup.py --update")
 
     print()
 
