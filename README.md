@@ -82,11 +82,6 @@ The wizard will guide you through:
 - Deploying to Modal
 - Registering the Telegram webhook
 
-### 3. Backfill Historical Data (Recommended)
-
-```bash
-modal run modal_agent.py::backfill_history --days 365  # 1 year
-```
 
 <details>
 <summary><b>Manual Setup (Alternative)</b></summary>
