@@ -85,16 +85,19 @@ def get_oura_daily_data(token: str, date: str, context_date: str = None) -> dict
         data["workouts"] = []
 
     # Sleep endpoint: fetch sessions that ended on target date
+    # Only use type: "long_sleep" sessions (main sleep, 3+ hours)
+    # This filters out short fragments (type: "sleep", "rest", "late_nap") from incomplete recordings
     try:
         result = fetch_oura_data(token, "sleep", day_before, day_after)
         sleep_sessions = result.get("data", [])
         for session in reversed(sleep_sessions):
             bedtime_end = session.get("bedtime_end", "")
-            if date in bedtime_end:
+            session_type = session.get("type", "")
+            if date in bedtime_end and session_type == "long_sleep":
                 data["sleep"] = [session]
                 break
         if "sleep" not in data:
-            data["sleep"] = []  # No fallback - only use matching session
+            data["sleep"] = []  # No valid main sleep found
     except Exception as e:
         logger.warning(f"Failed to fetch sleep: {e}")
         data["sleep"] = []
@@ -130,16 +133,19 @@ def get_oura_sleep_data(token: str, wake_date: str) -> dict:
             data[endpoint] = []
 
     # Sleep endpoint: fetch sessions that ended on wake_date
+    # Only use type: "long_sleep" sessions (main sleep, 3+ hours)
+    # This filters out short fragments (type: "sleep", "rest", "late_nap") from incomplete recordings
     try:
         result = fetch_oura_data(token, "sleep", day_before, day_after)
         sleep_sessions = result.get("data", [])
         for session in reversed(sleep_sessions):
             bedtime_end = session.get("bedtime_end", "")
-            if wake_date in bedtime_end:
+            session_type = session.get("type", "")
+            if wake_date in bedtime_end and session_type == "long_sleep":
                 data["sleep"] = [session]
                 break
         if "sleep" not in data:
-            data["sleep"] = []  # No fallback - only use matching session
+            data["sleep"] = []  # No valid main sleep found
     except Exception as e:
         logger.warning(f"Failed to fetch sleep: {e}")
         data["sleep"] = []

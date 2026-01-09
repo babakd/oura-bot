@@ -183,19 +183,33 @@ def morning_brief():
         logger.info(f"Fetching sleep data for {today} (wake-date)...")
         sleep_data = get_oura_sleep_data(oura_token, today)
 
-        sleep_metrics = extract_sleep_metrics(sleep_data)
-        detailed_sleep = extract_detailed_sleep(sleep_data)
-        logger.info(f"Extracted sleep metrics: {len(sleep_metrics)} fields, detailed: {len(detailed_sleep)} fields")
+        # Check if we got valid main sleep data (type: "long_sleep")
+        # If not, we'll generate a partial brief with activity data only
+        no_valid_sleep = not sleep_data.get("sleep")
 
-        # Check if we actually got sleep data for today (Oura may not have synced yet)
-        if not sleep_data.get("sleep") or not detailed_sleep:
-            error_msg = f"Sleep data for {today} not yet available. Oura may not have synced."
-            logger.warning(error_msg)
-            if bot_token and chat_id:
-                send_telegram(f"⏳ *Morning Brief Delayed*\n\n{error_msg}\n\nPlease sync your Oura ring, then use /regen-brief to generate the brief.", bot_token, chat_id)
-            return {"status": "delayed", "date": today, "reason": "sleep_data_not_available"}
+        if no_valid_sleep:
+            # Determine if it's a sync issue or incomplete recording
+            if not sleep_data.get("daily_sleep"):
+                logger.warning(f"No main sleep recorded for {today} - ring may have been removed during sleep")
+                sleep_metrics = {
+                    "sleep_recorded": False,
+                    "sleep_note": "No main sleep recorded (ring removed or low battery during sleep)"
+                }
+            else:
+                logger.warning(f"Sleep data for {today} not yet available - Oura may not have synced")
+                sleep_metrics = {
+                    "sleep_recorded": False,
+                    "sleep_note": "Sleep data not yet synced from ring"
+                }
+            detailed_sleep = {}
+        else:
+            sleep_metrics = extract_sleep_metrics(sleep_data)
+            sleep_metrics["sleep_recorded"] = True
+            detailed_sleep = extract_detailed_sleep(sleep_data)
+            logger.info(f"Extracted sleep metrics: {len(sleep_metrics)} fields, detailed: {len(detailed_sleep)} fields")
 
-        save_daily_metrics(today, sleep_metrics, detailed_sleep, None, merge=True)
+        # Save whatever sleep metrics we have (may just be the sleep_recorded flag)
+        save_daily_metrics(today, sleep_metrics, detailed_sleep if detailed_sleep else None, None, merge=True)
         logger.info(f"Saved sleep data to metrics/{today}.json")
 
         # === FETCH AND SAVE ACTIVITY DATA (yesterday's file) ===

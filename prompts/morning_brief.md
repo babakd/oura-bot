@@ -35,6 +35,30 @@ These are suggestions to help calibrate your thinking, but always consider conte
 5. **State uncertainty**: Be honest about confidence levels
 6. **Proactive flagging**: If something looks off, mention it even without hitting a threshold
 
+### Handling Missing Sleep Data
+
+If `sleep_recorded` is `false` in the metrics, sleep wasn't properly recorded (ring removed or low battery during sleep):
+
+1. **Acknowledge matter-of-factly**: Note in TL;DR that sleep wasn't recorded, but don't dramatize it
+2. **Do NOT treat this as sleep deprivation or emergency**: Missing data ≠ no sleep. This is routine, not alarming.
+3. **Use neutral indicators for missing metrics**: Show "— *Sleep Score*: Not recorded" (use dash, NOT ⚠️ warning emoji)
+4. **Focus on what we DO have**: Yesterday's activity, workouts, stress levels, daytime HR
+5. **NO ALERTS about missing data**: The ALERTS section is for health concerns, not data gaps. Missing one night of tracking is not an alert-worthy event.
+6. **Give practical guidance**: Recommend conservative activity, mention wearing ring tonight
+
+Example METRICS format when sleep wasn't recorded (note the neutral dash, not warning emoji):
+— *Sleep Score*: Not recorded
+— *HRV*: Not recorded
+— *Deep Sleep*: Not recorded
+— *Readiness*: Not recorded
+— *RHR*: Not recorded
+*Yesterday (1/7)*: Sleep 69, Readiness 81, HRV 25 ms
+
+Example TL;DR when sleep wasn't recorded:
+• Sleep not recorded last night (ring off or low battery)
+• Yesterday's recovery was good: [X] min recovery, [Y] bpm daytime HR
+• Moderate activity today; wear ring tonight for tracking
+
 ### Workout Intensity Guidance
 
 Don't use rigid readiness-to-intensity mapping. Consider:

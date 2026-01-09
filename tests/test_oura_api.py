@@ -40,6 +40,7 @@ class TestSleepDataMissingEdgeCase:
         mock_response = {
             "data": [{
                 "id": "sleep-correct",
+                "type": "long_sleep",  # Required for filtering
                 "day": "2026-01-03",
                 "bedtime_start": "2026-01-03T23:30:00-05:00",
                 "bedtime_end": "2026-01-04T07:15:00-05:00",  # Ended on Jan 4 - correct!
@@ -61,6 +62,7 @@ class TestSleepDataMissingEdgeCase:
             "data": [
                 {
                     "id": "sleep-old",
+                    "type": "long_sleep",
                     "day": "2026-01-02",
                     "bedtime_start": "2026-01-02T23:30:00-05:00",
                     "bedtime_end": "2026-01-03T07:15:00-05:00",  # Wrong date
@@ -68,6 +70,7 @@ class TestSleepDataMissingEdgeCase:
                 },
                 {
                     "id": "sleep-correct",
+                    "type": "long_sleep",
                     "day": "2026-01-03",
                     "bedtime_start": "2026-01-03T23:30:00-05:00",
                     "bedtime_end": "2026-01-04T07:15:00-05:00",  # Correct date
@@ -146,6 +149,7 @@ class TestGetOuraDailyDataSleepMatching:
             if endpoint == "sleep":
                 return {"data": [{
                     "id": "sleep-correct",
+                    "type": "long_sleep",  # Required for filtering
                     "bedtime_end": "2026-01-04T07:15:00-05:00",  # Correct date
                 }]}
             return {"data": []}
@@ -163,10 +167,12 @@ class TestGetOuraDailyDataSleepMatching:
                 return {"data": [
                     {
                         "id": "sleep-old",
+                        "type": "long_sleep",
                         "bedtime_end": "2026-01-03T07:15:00-05:00",
                     },
                     {
                         "id": "sleep-correct",
+                        "type": "long_sleep",
                         "bedtime_end": "2026-01-04T07:15:00-05:00",
                     },
                 ]}
@@ -177,3 +183,147 @@ class TestGetOuraDailyDataSleepMatching:
 
             assert len(result["sleep"]) == 1
             assert result["sleep"][0]["id"] == "sleep-correct"
+
+
+class TestSleepTypeFiltering:
+    """Test cases for filtering sleep sessions by type (long_sleep vs rest/sleep/late_nap)."""
+
+    def test_get_oura_sleep_data_filters_out_rest_type(self):
+        """
+        When ring is removed during sleep, Oura returns type: "rest" sessions.
+        These should be filtered out, not used as main sleep.
+        """
+        mock_response = {
+            "data": [{
+                "id": "rest-session",
+                "type": "rest",  # NOT long_sleep - should be filtered
+                "day": "2026-01-08",
+                "bedtime_start": "2026-01-08T02:39:00-05:00",
+                "bedtime_end": "2026-01-08T03:12:00-05:00",
+                "total_sleep_duration": 1020,  # 17 minutes
+            }]
+        }
+
+        with patch('oura_agent.api.oura.fetch_oura_data') as mock_fetch:
+            mock_fetch.return_value = mock_response
+
+            result = get_oura_sleep_data("fake_token", "2026-01-08")
+
+            assert result["sleep"] == [], \
+                "type: 'rest' sessions should be filtered out"
+
+    def test_get_oura_sleep_data_filters_out_short_sleep_type(self):
+        """
+        Short sleep fragments (type: "sleep") should be filtered out.
+        Only type: "long_sleep" (3+ hours) should be used.
+        """
+        mock_response = {
+            "data": [{
+                "id": "short-sleep",
+                "type": "sleep",  # NOT long_sleep - should be filtered
+                "day": "2026-01-08",
+                "bedtime_start": "2026-01-08T00:45:00-05:00",
+                "bedtime_end": "2026-01-08T01:10:00-05:00",
+                "total_sleep_duration": 780,  # 13 minutes
+            }]
+        }
+
+        with patch('oura_agent.api.oura.fetch_oura_data') as mock_fetch:
+            mock_fetch.return_value = mock_response
+
+            result = get_oura_sleep_data("fake_token", "2026-01-08")
+
+            assert result["sleep"] == [], \
+                "type: 'sleep' (short fragment) sessions should be filtered out"
+
+    def test_get_oura_sleep_data_filters_out_late_nap_type(self):
+        """Late nap sessions (type: "late_nap") should be filtered out."""
+        mock_response = {
+            "data": [{
+                "id": "late-nap",
+                "type": "late_nap",  # NOT long_sleep - should be filtered
+                "day": "2026-01-07",
+                "bedtime_start": "2026-01-07T20:00:00-05:00",
+                "bedtime_end": "2026-01-08T00:30:00-05:00",
+                "total_sleep_duration": 14400,  # 4 hours but wrong type
+            }]
+        }
+
+        with patch('oura_agent.api.oura.fetch_oura_data') as mock_fetch:
+            mock_fetch.return_value = mock_response
+
+            result = get_oura_sleep_data("fake_token", "2026-01-08")
+
+            assert result["sleep"] == [], \
+                "type: 'late_nap' sessions should be filtered out"
+
+    def test_get_oura_sleep_data_accepts_long_sleep_type(self):
+        """Only type: "long_sleep" sessions should be accepted."""
+        mock_response = {
+            "data": [{
+                "id": "main-sleep",
+                "type": "long_sleep",  # Correct type - should be used
+                "day": "2026-01-07",
+                "bedtime_start": "2026-01-07T23:30:00-05:00",
+                "bedtime_end": "2026-01-08T07:15:00-05:00",
+                "total_sleep_duration": 25200,  # 7 hours
+            }]
+        }
+
+        with patch('oura_agent.api.oura.fetch_oura_data') as mock_fetch:
+            mock_fetch.return_value = mock_response
+
+            result = get_oura_sleep_data("fake_token", "2026-01-08")
+
+            assert len(result["sleep"]) == 1
+            assert result["sleep"][0]["id"] == "main-sleep"
+
+    def test_get_oura_sleep_data_picks_long_sleep_over_fragments(self):
+        """
+        When multiple sessions exist (fragments + long_sleep),
+        should pick the long_sleep one.
+        """
+        mock_response = {
+            "data": [
+                {
+                    "id": "rest-fragment",
+                    "type": "rest",
+                    "bedtime_end": "2026-01-08T01:10:00-05:00",
+                },
+                {
+                    "id": "sleep-fragment",
+                    "type": "sleep",
+                    "bedtime_end": "2026-01-08T03:12:00-05:00",
+                },
+                {
+                    "id": "main-sleep",
+                    "type": "long_sleep",
+                    "bedtime_end": "2026-01-08T07:15:00-05:00",
+                },
+            ]
+        }
+
+        with patch('oura_agent.api.oura.fetch_oura_data') as mock_fetch:
+            mock_fetch.return_value = mock_response
+
+            result = get_oura_sleep_data("fake_token", "2026-01-08")
+
+            assert len(result["sleep"]) == 1
+            assert result["sleep"][0]["id"] == "main-sleep"
+
+    def test_get_oura_daily_data_filters_by_type(self):
+        """Same type filtering should apply to get_oura_daily_data()."""
+        def mock_fetch(token, endpoint, start, end):
+            if endpoint == "sleep":
+                return {"data": [{
+                    "id": "rest-session",
+                    "type": "rest",  # Should be filtered
+                    "bedtime_end": "2026-01-08T03:12:00-05:00",
+                }]}
+            return {"data": []}
+
+        with patch('oura_agent.api.oura.fetch_oura_data', side_effect=mock_fetch):
+            result = get_oura_daily_data("fake_token", "2026-01-08")
+
+            assert result["sleep"] == [], \
+                "get_oura_daily_data should also filter by type"

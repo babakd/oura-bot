@@ -182,6 +182,7 @@ def extract_detailed_sleep(oura_data: dict) -> dict:
     sleep = oura_data["sleep"][0]
 
     detailed = {
+        "type": sleep.get("type"),  # Sleep type: long_sleep, sleep, rest, late_nap
         "bedtime_start": sleep.get("bedtime_start"),
         "bedtime_end": sleep.get("bedtime_end"),
         "time_in_bed_minutes": sleep.get("time_in_bed", 0) // 60,

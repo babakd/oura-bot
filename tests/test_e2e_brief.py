@@ -111,7 +111,7 @@ class TestMorningBriefE2E:
         mock_now_nyc,
         monkeypatch,
     ):
-        """Test that brief is delayed when Oura hasn't synced (no sleep data)."""
+        """Test that partial brief is generated when no sleep data is recorded (ring removed)."""
         import modal_agent
 
         # Mock credentials
@@ -123,13 +123,30 @@ class TestMorningBriefE2E:
         }
         monkeypatch.setattr("os.environ.get", lambda k, default=None: env_vars.get(k, default))
 
-        # Return empty sleep data (Oura not synced)
+        # Return empty sleep data (ring removed during sleep)
         empty_sleep_data = {
             "sleep": [],
             "daily_sleep": [],
             "daily_readiness": [],
         }
         monkeypatch.setattr(modal_agent, "get_oura_sleep_data", lambda token, date: empty_sleep_data)
+
+        # Return activity data (we should still get activity data)
+        activity_data = {
+            "daily_activity": [{"score": 75, "steps": 8000}],
+            "daily_stress": [{"stress_high": 3600, "recovery_high": 1800, "day_summary": "normal"}],
+            "workouts": [],
+            "daytime_hr": [{"bpm": 70}],
+        }
+        monkeypatch.setattr(modal_agent, "get_oura_activity_data", lambda token, date: activity_data)
+
+        # Mock Claude to generate partial brief
+        mock_brief_content = "# Partial Brief\n\nSleep not recorded. Focus on activity data."
+        monkeypatch.setattr(
+            modal_agent,
+            "generate_brief_with_claude",
+            lambda *args, **kwargs: mock_brief_content
+        )
 
         # Mock Telegram send
         telegram_calls = []
@@ -138,21 +155,27 @@ class TestMorningBriefE2E:
             return True
         monkeypatch.setattr(modal_agent, "send_telegram", mock_send_telegram)
 
+        # Mock volume.commit
+        monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
+
         # Run the morning brief
         result = modal_agent.morning_brief.local()
 
-        # Verify delayed status
-        assert result["status"] == "delayed"
-        assert result["reason"] == "sleep_data_not_available"
+        # Verify success status (partial brief generated)
+        assert result["status"] == "success"
+        assert result["date"] == "2026-01-15"
 
-        # Verify delay message was sent to Telegram
+        # Verify metrics include sleep_recorded flag
+        assert "metrics" in result
+        assert result["metrics"].get("sleep_recorded") == False
+
+        # Verify brief was sent to Telegram
         assert len(telegram_calls) == 1
-        assert "Morning Brief Delayed" in telegram_calls[0]["message"]
-        assert "/regen-brief" in telegram_calls[0]["message"]
+        assert "*Morning Brief" in telegram_calls[0]["message"]
 
-        # Verify no brief was saved
+        # Verify brief was saved
         brief_file = temp_data_dir / "briefs" / "2026-01-15.md"
-        assert not brief_file.exists()
+        assert brief_file.exists()
 
     def test_morning_brief_first_run(
         self,
