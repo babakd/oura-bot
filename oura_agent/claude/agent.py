@@ -37,6 +37,25 @@ def _get_agent_prompt() -> str:
         return ""
 
 
+def get_brief_prompt() -> str:
+    """Load the static morning-brief prompt."""
+    try:
+        return load_prompt("morning_brief")
+    except FileNotFoundError:
+        logger.error("CRITICAL: morning_brief.md prompt not found!")
+        return ""
+
+
+def build_brief_system_blocks() -> list:
+    """Cached brief system prompt + uncached date block."""
+    prompt = get_brief_prompt()
+    current_date = now_nyc().strftime("%Y-%m-%d")
+    return [
+        {"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": f"Today is {current_date}."},
+    ]
+
+
 def _build_system_blocks(static_prompt: str) -> list:
     """Build system blocks: cached static prompt + dynamic date block.
 
@@ -154,6 +173,14 @@ TOOLS = [
             "required": ["substance", "metric"],
         },
     },
+]
+
+
+# Brief gets the same data tools as chat PLUS the server-side code_execution
+# tool for real statistics. Server tools are handled by Anthropic; we only
+# dispatch client-side tools in the loop.
+BRIEF_TOOLS = TOOLS + [
+    {"type": "code_execution_20250825", "name": "code_execution"},
 ]
 
 
@@ -422,6 +449,110 @@ def handle_message_with_agent(
     if streamer is not None:
         streamer.finalize("I wasn't able to complete the analysis. Please try rephrasing your question.")
     return "I wasn't able to complete the analysis. Please try rephrasing your question."
+
+
+def run_brief_agent(
+    api_key: str,
+    today: str,
+    metrics: dict,
+    detailed_sleep: dict,
+    detailed_workouts: list,
+    max_iterations: int = 10,
+) -> str:
+    """Run the morning brief as a tool-using agent.
+
+    The brief receives only last night's metrics + yesterday's activity as a
+    seed. It pulls historical context, baselines, interventions, correlations,
+    and recent briefs via tools as needed, and computes statistics via the
+    server-side code_execution tool. This replaces the old one-shot dump.
+    """
+    client = anthropic.Anthropic(api_key=api_key)
+    system_blocks = build_brief_system_blocks()
+    if not system_blocks[0]["text"]:
+        return "ERROR: morning_brief.md prompt not available"
+
+    seed = f"""Generate my morning optimization brief for {today}.
+
+═══════════════════════════════════════════════════════════════════════════════
+LAST NIGHT'S METRICS (wake-date {today})
+═══════════════════════════════════════════════════════════════════════════════
+
+```json
+{json.dumps(metrics, indent=2)}
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+DETAILED SLEEP DATA
+═══════════════════════════════════════════════════════════════════════════════
+
+```json
+{json.dumps(detailed_sleep, indent=2)}
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+YESTERDAY'S WORKOUTS
+═══════════════════════════════════════════════════════════════════════════════
+
+```json
+{json.dumps(detailed_workouts, indent=2)}
+```
+
+Use your tools to pull any additional context you need — baselines, historical
+metrics, interventions, correlations, recent briefs. Compute real statistics
+via code_execution rather than approximating. Produce only the final brief as
+your last text output; intermediate reasoning/narration is fine during tool
+calls but the brief itself should read as a single coherent message.
+"""
+
+    messages = [{"role": "user", "content": seed}]
+    last_response = None
+
+    for iteration in range(max_iterations):
+        try:
+            response = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=16000,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "high"},
+                system=system_blocks,
+                tools=BRIEF_TOOLS,
+                messages=messages,
+            )
+        except anthropic.APIError as e:
+            logger.error(f"Brief API error: {e}")
+            return f"ERROR generating brief: {e}"
+
+        last_response = response
+        # Only client-side tool uses block progress. Server tools
+        # (code_execution) are of type 'server_tool_use' and are
+        # handled transparently by the API.
+        client_tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+        if not client_tool_uses:
+            text_parts = [b.text for b in response.content if b.type == "text"]
+            return "\n\n".join(t for t in text_parts if t.strip()) or (
+                response.content[-1].text if response.content else ""
+            )
+
+        tool_results = []
+        for tu in client_tool_uses:
+            logger.info(f"Brief executing tool: {tu.name}")
+            result = execute_tool(tu.name, tu.input)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tu.id,
+                "content": result,
+            })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    logger.error(f"Brief agent exhausted {max_iterations} iterations")
+    if last_response is not None:
+        text_parts = [b.text for b in last_response.content if b.type == "text"]
+        if text_parts:
+            return "\n\n".join(text_parts)
+    return "ERROR: brief agent exhausted iterations without final output"
 
 
 def _run_streaming_iteration(

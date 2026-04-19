@@ -60,7 +60,7 @@ class TestMorningBriefE2E:
         mock_brief_content = "# Test Brief\n\nThis is a mock morning brief."
         monkeypatch.setattr(
             modal_agent,
-            "generate_brief_with_claude",
+            "generate_brief_with_agent",
             lambda *args, **kwargs: mock_brief_content
         )
 
@@ -144,7 +144,7 @@ class TestMorningBriefE2E:
         mock_brief_content = "# Partial Brief\n\nSleep not recorded. Focus on activity data."
         monkeypatch.setattr(
             modal_agent,
-            "generate_brief_with_claude",
+            "generate_brief_with_agent",
             lambda *args, **kwargs: mock_brief_content
         )
 
@@ -222,7 +222,7 @@ class TestMorningBriefE2E:
         def mock_generate_brief(*args, **kwargs):
             claude_calls.append({"args": args, "kwargs": kwargs})
             return "# First Run Brief"
-        monkeypatch.setattr(modal_agent, "generate_brief_with_claude", mock_generate_brief)
+        monkeypatch.setattr(modal_agent, "generate_brief_with_agent", mock_generate_brief)
 
         # Mock Telegram and volume
         monkeypatch.setattr(modal_agent, "send_telegram", lambda *args: True)
@@ -234,13 +234,14 @@ class TestMorningBriefE2E:
         # Verify success
         assert result["status"] == "success"
 
-        # Verify Claude was called with default baselines (first run)
+        # Verify Claude was called once
         assert len(claude_calls) == 1
-        # args[5] is baselines in generate_brief_with_claude
-        baselines_arg = claude_calls[0]["args"][5]
-        assert "metrics" in baselines_arg
+        # New signature: (api_key, today, metrics, detailed_sleep, detailed_workouts)
+        # Brief agent no longer receives baselines upfront — it fetches via tools.
+        assert claude_calls[0]["args"][1] == "2026-01-15"
+        assert "sleep_score" in claude_calls[0]["args"][2] or claude_calls[0]["args"][2].get("sleep_recorded") is False
 
-        # Verify baselines file was created
+        # Verify baselines file was created (still loaded for post-brief update path)
         baselines_file = temp_data_dir / "baselines.json"
         assert baselines_file.exists()
 
@@ -288,7 +289,7 @@ class TestMorningBriefEdgeCases:
 
         # Mock Claude
         mock_brief = "# Brief Content"
-        monkeypatch.setattr(modal_agent, "generate_brief_with_claude", lambda *args, **kwargs: mock_brief)
+        monkeypatch.setattr(modal_agent, "generate_brief_with_agent", lambda *args, **kwargs: mock_brief)
 
         # Mock Telegram to fail
         monkeypatch.setattr(modal_agent, "send_telegram", lambda *args: False)

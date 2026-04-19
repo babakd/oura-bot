@@ -93,7 +93,7 @@ from oura_agent.telegram.client import (
 
 # Claude handlers
 from oura_agent.claude.handlers import (
-    generate_brief_with_claude,
+    generate_brief_with_agent,
     clean_intervention_with_claude,
     analyze_photo_with_claude,
 )
@@ -156,7 +156,7 @@ __all__ = [
     "send_telegram",
     "download_telegram_photo",
     # Claude
-    "generate_brief_with_claude",
+    "generate_brief_with_agent",
     "clean_intervention_with_claude",
     "analyze_photo_with_claude",
 ]

@@ -38,18 +38,13 @@ class TestBriefPromptCaching:
         monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
         return mock_client
 
-    def test_brief_system_prompt_is_cached_block_list(self, monkeypatch, sample_baselines):
+    def test_brief_system_prompt_is_cached_block_list(self, monkeypatch):
         mock_client = self._make_mock_client(monkeypatch)
 
-        handlers.generate_brief_with_claude(
-            "fake-key",
-            "2026-01-15",
+        handlers.generate_brief_with_agent(
+            "fake-key", "2026-01-15",
             {"sleep_score": 82},
             {"bedtime_start": "x", "bedtime_end": "y"},
-            [],
-            sample_baselines,
-            [],
-            {},
             [],
         )
 
@@ -62,12 +57,13 @@ class TestBriefPromptCaching:
         assert first.get("cache_control", {}).get("type") == "ephemeral"
         assert first["text"], "cached block must contain the system prompt"
 
-    def test_brief_uses_opus_4_7(self, monkeypatch, sample_baselines):
+    def test_brief_uses_opus_4_7(self, monkeypatch):
         mock_client = self._make_mock_client(monkeypatch)
-        handlers.generate_brief_with_claude(
-            "fake-key", "2026-01-15", {"sleep_score": 82},
+        handlers.generate_brief_with_agent(
+            "fake-key", "2026-01-15",
+            {"sleep_score": 82},
             {"bedtime_start": "x", "bedtime_end": "y"},
-            [], sample_baselines, [], {}, [],
+            [],
         )
         call = mock_client.messages.create.call_args
         assert call.kwargs["model"] == "claude-opus-4-7"

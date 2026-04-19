@@ -23,13 +23,14 @@ class TestBriefCodeExecution:
         monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
         return mock_client
 
-    def test_brief_passes_code_execution_tool(self, monkeypatch, sample_baselines):
+    def test_brief_passes_code_execution_tool(self, monkeypatch):
         mock_client = self._make_client(monkeypatch, ["*TL;DR*\nbrief body"])
 
-        handlers.generate_brief_with_claude(
-            "fake-key", "2026-01-15", {"sleep_score": 82},
+        handlers.generate_brief_with_agent(
+            "fake-key", "2026-01-15",
+            {"sleep_score": 82},
             {"bedtime_start": "x", "bedtime_end": "y"},
-            [], sample_baselines, [], {}, [],
+            [],
         )
         call = mock_client.messages.create.call_args
         tools = call.kwargs.get("tools")
@@ -37,21 +38,26 @@ class TestBriefCodeExecution:
         code_exec = next((t for t in tools if "code_execution" in str(t.get("type", "") + t.get("name", ""))), None)
         assert code_exec is not None, f"code_execution tool missing from {tools}"
 
-    def test_brief_concatenates_multiple_text_blocks(self, monkeypatch, sample_baselines):
-        """With code execution, Claude emits multiple text blocks interleaved with tool use.
-        Our handler should combine them into a single brief."""
-        self._make_client(
-            monkeypatch,
-            [
-                "Analyzing your data...",
-                "*TL;DR*\n• Core finding\n\n*METRICS*\n...",
-            ],
-        )
+    def test_brief_concatenates_multiple_text_blocks(self, monkeypatch):
+        """When Claude emits multiple text blocks (e.g. interleaved with code exec),
+        the handler concatenates them."""
+        # Single response with two text blocks — this is what the final (no tool use)
+        # iteration looks like when code_execution ran.
+        mock_resp = MagicMock()
+        mock_resp.content = [
+            MagicMock(type="text", text="Analyzing your data..."),
+            MagicMock(type="text", text="*TL;DR*\n• Core finding\n\n*METRICS*\n..."),
+        ]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_resp
+        import anthropic
+        monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: mock_client)
 
-        brief = handlers.generate_brief_with_claude(
-            "fake-key", "2026-01-15", {"sleep_score": 82},
+        brief = handlers.generate_brief_with_agent(
+            "fake-key", "2026-01-15",
+            {"sleep_score": 82},
             {"bedtime_start": "x", "bedtime_end": "y"},
-            [], sample_baselines, [], {}, [],
+            [],
         )
         assert "*TL;DR*" in brief
         assert "Core finding" in brief

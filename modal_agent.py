@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "anthropic>=0.40.0",
+        "anthropic>=0.86.0",
         "requests>=2.28.0",
         "fastapi>=0.100.0",
         "tenacity>=8.2.0",
@@ -123,7 +123,7 @@ from oura_agent.telegram.client import (
 )
 
 from oura_agent.claude.handlers import (
-    generate_brief_with_claude,
+    generate_brief_with_agent,
     clean_intervention_with_claude,
     analyze_photo_with_claude,
 )
@@ -236,28 +236,18 @@ def morning_brief():
         if not metrics:
             raise ValueError("No metrics extracted from Oura data")
 
-        # Load baselines (60-day aggregates)
+        # Load baselines for the post-brief update step. The brief itself no
+        # longer receives these upfront — it pulls via get_baselines tool when
+        # needed.
         baselines = load_baselines()
 
-        # Load historical context for morning brief (28 days - keeps brief focused on recent data)
-        historical_metrics = load_historical_metrics(BRIEF_HISTORY_DAYS)
-        historical_interventions = load_historical_interventions(BRIEF_HISTORY_DAYS)
-        recent_briefs = load_recent_briefs(3)
-
-        logger.info(f"Loaded context: {len(historical_metrics)} days of metrics, {len(historical_interventions)} days with interventions")
-
-        # Generate brief with Claude
-        logger.info("Generating brief with Claude Opus 4.7...")
-        brief_content = generate_brief_with_claude(
+        logger.info("Generating brief with Claude Opus 4.7 (tool-using agent)...")
+        brief_content = generate_brief_with_agent(
             anthropic_key,
             today,
             metrics,
             detailed_sleep,
             detailed_workouts,
-            baselines,
-            historical_metrics,
-            historical_interventions,
-            recent_briefs
         )
 
         # Save brief
