@@ -268,8 +268,15 @@ def morning_brief():
         # Commit volume changes
         volume.commit()
 
-        # Send to Telegram
-        telegram_message = f"*Morning Brief — {today}*\n\n{brief_content}"
+        # Telegram header: emoji + short human date + separator, with the
+        # brief's own TL;DR header leading the body. The brief prompt forbids
+        # any top-level `#` header so this wrapper isn't doubled up.
+        header_date = now_nyc().strftime("%b %-d")  # e.g. "Apr 19"
+        telegram_message = (
+            f"☀️ *Morning Brief · {header_date}*\n"
+            f"━━━━━━━━━━━━━━━━━\n\n"
+            f"{brief_content}"
+        )
 
         if send_telegram(telegram_message, bot_token, chat_id):
             logger.info("Brief sent to Telegram")
