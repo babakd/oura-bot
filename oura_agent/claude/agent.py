@@ -2,12 +2,13 @@
 Agent handler with tools for chat interactions.
 
 Uses Claude with tool use to handle both interventions and questions
-with a single code path. The agent decides dynamically what to do
-based on the message content.
+with a single code path. Supports text-only messages, image messages
+(photo interventions), and streaming responses via a TelegramStreamer.
 """
 
+import base64
 import json
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import anthropic
 
@@ -19,109 +20,102 @@ from oura_agent.storage.conversations import (
     save_conversation_message,
 )
 from oura_agent.storage.interventions import (
-    get_today_interventions,
     load_historical_interventions,
     save_intervention_raw,
 )
 from oura_agent.storage.metrics import load_historical_metrics, load_recent_briefs
+from oura_agent.telegram.client import _detect_image_mime_type
 from oura_agent.utils import now_nyc
 
 
 def _get_agent_prompt() -> str:
-    """Load agent prompt and inject current date."""
+    """Load the static agent prompt (no date injection; date lives in its own block)."""
     try:
-        prompt = load_prompt("agent")
-        current_date = now_nyc().strftime("%Y-%m-%d")
-        return prompt.replace("{current_date}", current_date)
+        return load_prompt("agent")
     except FileNotFoundError:
         logger.error("CRITICAL: agent.md prompt not found!")
         return ""
 
 
+def _build_system_blocks(static_prompt: str) -> list:
+    """Build system blocks: cached static prompt + dynamic date block.
+
+    The static block carries a cache_control marker so Anthropic caches
+    tools + static system across turns. The date block stays out of the
+    cache breakpoint so it can change daily without invalidating the cache.
+    """
+    current_date = now_nyc().strftime("%Y-%m-%d")
+    return [
+        {
+            "type": "text",
+            "text": static_prompt,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": f"Today is {current_date}.",
+        },
+    ]
+
+
 TOOLS = [
     {
         "name": "get_metrics",
-        "description": "Get daily health metrics for a date range. Use for questions about sleep, HRV, readiness trends. Returns summary data for each day including sleep_score, hrv, deep_sleep_minutes, readiness, resting_hr, stress_high, recovery_high, workout info.",
+        "description": (
+            "Get daily health metrics for a date range. Returns summary data for each day "
+            "(sleep_score, hrv, deep_sleep_minutes, readiness, resting_hr, stress_high, "
+            "recovery_high, workout info). Set include_detailed=true to also return the full "
+            "detailed_sleep blob (HR/HRV trends through the night, sleep stages, efficiency, "
+            "latency) — only do this for narrow ranges, it's verbose."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "start_date": {
-                    "type": "string",
-                    "description": "Start date YYYY-MM-DD"
-                },
-                "end_date": {
-                    "type": "string",
-                    "description": "End date YYYY-MM-DD (inclusive)"
+                "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "End date YYYY-MM-DD (inclusive)"},
+                "include_detailed": {
+                    "type": "boolean",
+                    "description": "If true, include detailed_sleep per day. Default false.",
                 },
             },
-            "required": ["start_date", "end_date"]
-        }
-    },
-    {
-        "name": "get_detailed_sleep",
-        "description": "Get detailed sleep data for a specific night (HR/HRV trends through the night, sleep stages percentages, efficiency, latency). Use when user asks about a specific night's sleep quality.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "date": {
-                    "type": "string",
-                    "description": "Date YYYY-MM-DD (the day you woke up)"
-                }
-            },
-            "required": ["date"]
-        }
+            "required": ["start_date", "end_date"],
+        },
     },
     {
         "name": "get_interventions",
-        "description": "Get logged interventions (supplements, activities, food, etc.) for a date range. Use for correlation analysis.",
+        "description": (
+            "Get logged interventions (supplements, activities, food, etc.) for a date range. "
+            "Use for correlation analysis or to check what was logged today (pass today's date "
+            "for both start and end)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "start_date": {
-                    "type": "string",
-                    "description": "Start date YYYY-MM-DD"
-                },
-                "end_date": {
-                    "type": "string",
-                    "description": "End date YYYY-MM-DD (inclusive)"
-                }
+                "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "End date YYYY-MM-DD (inclusive)"},
             },
-            "required": ["start_date", "end_date"]
-        }
+            "required": ["start_date", "end_date"],
+        },
     },
     {
         "name": "get_baselines",
         "description": "Get 60-day rolling baseline statistics (mean, std) for all metrics. Use to compare current values against personal averages.",
-        "input_schema": {
-            "type": "object",
-            "properties": {}
-        }
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "log_intervention",
-        "description": "Log an intervention the user reports (supplement, activity, food, etc). Use when user tells you they did/took something.",
+        "description": "Log an intervention the user reports (supplement, activity, food, etc). Use when the user tells you they did/took something.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "raw_text": {
-                    "type": "string",
-                    "description": "Original user input exactly as written"
-                },
+                "raw_text": {"type": "string", "description": "Original user input exactly as written"},
                 "normalized": {
                     "type": "string",
-                    "description": "Cleaned/normalized version (e.g., 'Magnesium 400mg', 'Sauna 20 min')"
-                }
+                    "description": "Cleaned/normalized version (e.g., 'Magnesium 400mg', 'Sauna 20 min')",
+                },
             },
-            "required": ["raw_text", "normalized"]
-        }
-    },
-    {
-        "name": "get_today_interventions",
-        "description": "Get all interventions logged today. Use to acknowledge what's been logged or answer questions about today's logging.",
-        "input_schema": {
-            "type": "object",
-            "properties": {}
-        }
+            "required": ["raw_text", "normalized"],
+        },
     },
     {
         "name": "get_recent_briefs",
@@ -129,13 +123,37 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "days": {"type": "integer", "description": "Number of days of briefs to retrieve (default 3, max 7)"},
+            },
+        },
+    },
+    {
+        "name": "correlate_intervention",
+        "description": (
+            "Correlate a logged intervention (e.g. 'magnesium', 'alcohol', 'sauna') with a metric "
+            "(e.g. 'sleep_score', 'hrv', 'readiness'). Returns mean/std of the metric on nights "
+            "following days with the substance vs. nights following days without it, plus a delta. "
+            "Use for questions like 'does X help my sleep?' or 'what's the impact of alcohol on HRV?'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "substance": {
+                    "type": "string",
+                    "description": "Substring to match against logged interventions, case-insensitive (e.g. 'magnesium').",
+                },
+                "metric": {
+                    "type": "string",
+                    "description": "Metric key from the daily summary (e.g. 'sleep_score', 'hrv', 'deep_sleep_minutes', 'readiness', 'resting_hr').",
+                },
                 "days": {
                     "type": "integer",
-                    "description": "Number of days of briefs to retrieve (default 3, max 7)"
-                }
-            }
-        }
-    }
+                    "description": "Lookback window in days. Default 60.",
+                },
+            },
+            "required": ["substance", "metric"],
+        },
+    },
 ]
 
 
@@ -143,54 +161,35 @@ def execute_tool(name: str, tool_input: dict) -> str:
     """Execute a tool and return JSON result."""
     try:
         if name == "get_metrics":
-            # Load all available metrics (no day limit)
             all_metrics = load_historical_metrics()
             start = tool_input["start_date"]
             end = tool_input["end_date"]
-            filtered = [
-                m for m in all_metrics
-                if start <= m.get("date", "") <= end
-            ]
-            # Return only summary data to keep response concise
-            result = [
-                {"date": m["date"], "summary": m.get("summary", {})}
-                for m in filtered
-            ]
+            include_detailed = bool(tool_input.get("include_detailed", False))
+            filtered = [m for m in all_metrics if start <= m.get("date", "") <= end]
+            result = []
+            for m in filtered:
+                entry = {"date": m["date"], "summary": m.get("summary", {})}
+                if include_detailed and m.get("detailed_sleep"):
+                    entry["detailed_sleep"] = m["detailed_sleep"]
+                result.append(entry)
             return json.dumps(result, indent=2)
 
-        elif name == "get_detailed_sleep":
-            # Load all available metrics (no day limit)
-            all_metrics = load_historical_metrics()
-            target_date = tool_input["date"]
-            for m in all_metrics:
-                if m.get("date") == target_date:
-                    detailed = m.get("detailed_sleep", {})
-                    if detailed:
-                        return json.dumps(detailed, indent=2)
-                    return json.dumps({"error": f"No detailed sleep data for {target_date}"})
-            return json.dumps({"error": f"No data found for {target_date}"})
-
         elif name == "get_interventions":
-            # Load all available interventions (no day limit)
             interventions = load_historical_interventions()
             start = tool_input["start_date"]
             end = tool_input["end_date"]
-            filtered = {
-                d: v for d, v in interventions.items()
-                if start <= d <= end
-            }
+            filtered = {d: v for d, v in interventions.items() if start <= d <= end}
             return json.dumps(filtered, indent=2)
 
         elif name == "get_baselines":
             baselines = load_baselines()
-            # Return just metrics without the raw values arrays
             simplified = {
                 "data_points": baselines.get("data_points", 0),
                 "last_updated": baselines.get("last_updated"),
                 "metrics": {
                     k: {"mean": v.get("mean"), "std": v.get("std")}
                     for k, v in baselines.get("metrics", {}).items()
-                }
+                },
             }
             return json.dumps(simplified, indent=2)
 
@@ -201,17 +200,23 @@ def execute_tool(name: str, tool_input: dict) -> str:
             return json.dumps({
                 "status": "logged",
                 "time": entry.get("time"),
-                "normalized": normalized
+                "normalized": normalized,
             })
-
-        elif name == "get_today_interventions":
-            entries = get_today_interventions()
-            return json.dumps(entries, indent=2)
 
         elif name == "get_recent_briefs":
             days = min(tool_input.get("days", 3), 7)
             briefs = load_recent_briefs(days)
             return json.dumps(briefs, indent=2)
+
+        elif name == "correlate_intervention":
+            return json.dumps(
+                _correlate_intervention(
+                    substance=tool_input["substance"],
+                    metric=tool_input["metric"],
+                    days=int(tool_input.get("days", 60)),
+                ),
+                indent=2,
+            )
 
         else:
             return json.dumps({"error": f"Unknown tool: {name}"})
@@ -221,21 +226,126 @@ def execute_tool(name: str, tool_input: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _correlate_intervention(substance: str, metric: str, days: int) -> dict:
+    """Pair each day's metric with whether the substance was logged the prior day.
+
+    Returns:
+        {substance, metric, window_days,
+         n_with, mean_with, std_with,
+         n_without, mean_without, std_without,
+         delta}
+
+    `delta` = mean_with - mean_without. Positive means the substance is
+    associated with a higher metric value. `mean_with`/`std_with` are None
+    when n_with == 0 (and likewise for `without`).
+    """
+    import statistics
+    from datetime import datetime, timedelta
+
+    substance_lc = substance.lower().strip()
+    interventions = load_historical_interventions()
+    substance_dates = set()
+    for date, day_data in interventions.items():
+        for e in day_data.get("entries", []):
+            text = (e.get("cleaned") or e.get("raw") or "").lower()
+            if substance_lc and substance_lc in text:
+                substance_dates.add(date)
+                break
+
+    today = now_nyc().date()
+    cutoff = today - timedelta(days=days)
+
+    with_values = []
+    without_values = []
+    for m in load_historical_metrics():
+        date_str = m.get("date", "")
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if d < cutoff or d > today:
+            continue
+        val = m.get("summary", {}).get(metric)
+        if val is None:
+            continue
+        prev_date = (d - timedelta(days=1)).strftime("%Y-%m-%d")
+        if prev_date in substance_dates:
+            with_values.append(val)
+        else:
+            without_values.append(val)
+
+    def _stats(values):
+        if not values:
+            return 0, None, None
+        return (
+            len(values),
+            round(statistics.mean(values), 2),
+            round(statistics.stdev(values), 2) if len(values) > 1 else 0.0,
+        )
+
+    n_w, m_w, s_w = _stats(with_values)
+    n_wo, m_wo, s_wo = _stats(without_values)
+    delta = (m_w - m_wo) if (m_w is not None and m_wo is not None) else None
+
+    return {
+        "substance": substance,
+        "metric": metric,
+        "window_days": days,
+        "n_with": n_w,
+        "mean_with": m_w,
+        "std_with": s_w,
+        "n_without": n_wo,
+        "mean_without": m_wo,
+        "std_without": s_wo,
+        "delta": round(delta, 2) if delta is not None else None,
+    }
+
+
+def _build_user_content(user_message: str, image_data: Optional[bytes]) -> Any:
+    """Build the content for the user turn — plain string or list with image block."""
+    if not image_data:
+        return user_message
+    mime = _detect_image_mime_type(image_data)
+    b64 = base64.b64encode(image_data).decode("utf-8")
+    text = user_message or "[image]"
+    return [
+        {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
+        {"type": "text", "text": text},
+    ]
+
+
+def _conversation_text_for_history(user_message: str, image_data: Optional[bytes]) -> str:
+    """What to persist to conversation history for this user turn."""
+    if image_data and not user_message:
+        return "[photo]"
+    if image_data:
+        return f"[photo] {user_message}"
+    return user_message
+
+
 def handle_message_with_agent(
     api_key: str,
     user_message: str,
-    send_progress: Optional[Callable[[str], None]] = None
+    send_progress: Optional[Callable[[str], None]] = None,
+    streamer: Optional[Any] = None,
+    image_data: Optional[bytes] = None,
 ) -> str:
     """
-    Handle any message using agent with tools.
+    Handle any message using the agent with tools.
 
     Args:
-        api_key: Anthropic API key
-        user_message: The user's message
-        send_progress: Optional callback to send progress updates (e.g., to Telegram)
+        api_key: Anthropic API key.
+        user_message: The user's text (may be empty when image_data is set).
+        send_progress: Legacy callback invoked once with the agent's pre-tool
+            "Looking at your data..." text. Used when `streamer` is not set.
+        streamer: Optional TelegramStreamer; when present, the agent uses the
+            streaming API and pushes text deltas into the streamer incrementally.
+        image_data: Optional raw image bytes (from a Telegram photo). When set,
+            the first user turn carries an image content block so the agent
+            can decide via its tools whether it's an intervention worth logging.
 
     Returns:
-        The agent's final response text
+        The agent's final response text.
     """
     client = anthropic.Anthropic(api_key=api_key)
     agent_prompt = _get_agent_prompt()
@@ -243,57 +353,58 @@ def handle_message_with_agent(
     if not agent_prompt:
         return "Sorry, I'm not properly configured. Please check the logs."
 
-    # Load conversation history for context
-    history = load_conversation_history(10, today_only=True)
-    messages = [{"role": msg["role"], "content": msg["content"]} for msg in history]
-    messages.append({"role": "user", "content": user_message})
+    system_blocks = _build_system_blocks(agent_prompt)
 
-    max_iterations = 5  # Prevent infinite loops
+    history = load_conversation_history(limit=20, days_back=3)
+    messages = [{"role": msg["role"], "content": msg["content"]} for msg in history]
+    messages.append({"role": "user", "content": _build_user_content(user_message, image_data)})
+
+    persisted_user_text = _conversation_text_for_history(user_message, image_data)
+
+    max_iterations = 5
     progress_sent = False
 
     for iteration in range(max_iterations):
         try:
-            response = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=16000,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": 10000
-                },
-                system=agent_prompt,
-                tools=TOOLS,
-                messages=messages
-            )
+            if streamer is not None:
+                response = _run_streaming_iteration(client, system_blocks, messages, streamer)
+            else:
+                response = client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=16000,
+                    thinking={"type": "adaptive"},
+                    output_config={"effort": "high"},
+                    system=system_blocks,
+                    tools=TOOLS,
+                    messages=messages,
+                )
         except anthropic.APIError as e:
             logger.error(f"Anthropic API error: {e}")
             return "Sorry, I encountered an error. Please try again."
 
-        # Check for tool use
         tool_uses = [b for b in response.content if b.type == "tool_use"]
 
         if not tool_uses:
-            # No tools - extract final text response
             text_response = ""
             for block in response.content:
                 if block.type == "text":
                     text_response = block.text
                     break
 
-            # Save conversation
-            save_conversation_message("user", user_message)
+            if streamer is not None:
+                streamer.finalize(text_response)
+
+            save_conversation_message("user", persisted_user_text)
             save_conversation_message("assistant", text_response)
             return text_response
 
-        # Extract and send progress text BEFORE tool execution (if any)
-        # Agent is prompted to output "Looking at your data..." before tool calls
-        if send_progress and not progress_sent:
+        if send_progress and streamer is None and not progress_sent:
             for block in response.content:
                 if block.type == "text" and block.text.strip():
                     send_progress(block.text)
                     progress_sent = True
                     break
 
-        # Execute tools and continue loop
         tool_results = []
         for tool_use in tool_uses:
             logger.info(f"Executing tool: {tool_use.name}")
@@ -301,14 +412,42 @@ def handle_message_with_agent(
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tool_use.id,
-                "content": result
+                "content": result,
             })
 
-        # Add assistant response and tool results to conversation
-        # Need to serialize content blocks for the API
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
-    # Exhausted iterations
     logger.warning(f"Agent exhausted {max_iterations} iterations")
+    if streamer is not None:
+        streamer.finalize("I wasn't able to complete the analysis. Please try rephrasing your question.")
     return "I wasn't able to complete the analysis. Please try rephrasing your question."
+
+
+def _run_streaming_iteration(
+    client: "anthropic.Anthropic",
+    system_blocks: list,
+    messages: list,
+    streamer: Any,
+):
+    """One streaming pass: push text deltas into the streamer, return the final Message."""
+    accumulated = ""
+    with client.messages.stream(
+        model=CLAUDE_MODEL,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "high"},
+        system=system_blocks,
+        tools=TOOLS,
+        messages=messages,
+    ) as stream:
+        for chunk in stream.text_stream:
+            if not chunk:
+                continue
+            accumulated += chunk
+            streamer.append_delta(chunk)
+        final_message = stream.get_final_message()
+    # If the iteration produced text but then went on to a tool call in the
+    # same turn, the streamed progress text stays visible until the next
+    # iteration's deltas or the final answer overwrite it — desired UX.
+    return final_message

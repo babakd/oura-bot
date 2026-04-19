@@ -1,7 +1,7 @@
 """
 Oura Daily Optimization Agent
 Runs daily via Modal cron, analyzes Oura data, sends brief to Telegram.
-Uses Claude Opus 4.5 for analysis.
+Uses Claude Opus 4.7 for analysis.
 
 This is the Modal entrypoint. All logic is in the oura_agent package.
 """
@@ -66,7 +66,6 @@ from oura_agent.prompts import (
     get_prompts_dir as _get_prompts_dir,
     load_prompt as _load_prompt,
     SYSTEM_PROMPT,
-    CHAT_SYSTEM_PROMPT,
 )
 
 from oura_agent.api.oura import (
@@ -115,6 +114,9 @@ from oura_agent.storage.conversations import (
 
 from oura_agent.telegram.client import (
     send_telegram,
+    send_telegram_message,
+    edit_telegram_message,
+    TelegramStreamer,
     download_telegram_photo,
     _detect_image_mime_type,
     _send_telegram_chunk,
@@ -123,10 +125,7 @@ from oura_agent.telegram.client import (
 from oura_agent.claude.handlers import (
     generate_brief_with_claude,
     clean_intervention_with_claude,
-    handle_message,
-    format_intervention_response,
     analyze_photo_with_claude,
-    build_chat_context,
 )
 
 from oura_agent.claude.agent import handle_message_with_agent
@@ -162,7 +161,7 @@ def morning_brief():
     Main agent function. Runs daily to:
     1. Fetch Oura data
     2. Analyze against baselines
-    3. Generate recommendations with Claude Opus 4.5
+    3. Generate recommendations with Claude Opus 4.7
     4. Send brief to Telegram
     """
     today = now_nyc().strftime("%Y-%m-%d")
@@ -248,7 +247,7 @@ def morning_brief():
         logger.info(f"Loaded context: {len(historical_metrics)} days of metrics, {len(historical_interventions)} days with interventions")
 
         # Generate brief with Claude
-        logger.info("Generating brief with Claude Opus 4.5...")
+        logger.info("Generating brief with Claude Opus 4.7...")
         brief_content = generate_brief_with_claude(
             anthropic_key,
             today,
@@ -332,7 +331,7 @@ def log_intervention(raw_text: str):
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if bot_token and chat_id:
-        send_telegram(f"✓ {cleaned_text}", bot_token, chat_id)
+        send_telegram(f"✓ Logged: {cleaned_text}", bot_token, chat_id)
 
     logger.info(f"Logged intervention: {cleaned_text}")
     return entry
@@ -346,11 +345,13 @@ def log_intervention(raw_text: str):
     volumes={"/data": volume},
     timeout=300,
 )
-def process_chat_message(text: str):
+def process_chat_message(text: str, image_data: bytes = None):
     """
-    Process a chat message asynchronously.
-    Called via spawn() from webhook to avoid Telegram timeout.
-    Sends response directly to Telegram when done.
+    Process a chat message asynchronously with streaming to Telegram.
+
+    The bot posts an initial placeholder message, then edits it incrementally
+    as Claude produces tokens. Spawned from the webhook to avoid Telegram's
+    60s timeout. Supports photo messages via image_data.
     """
     _reload_volume()
     ensure_directories()
@@ -359,22 +360,20 @@ def process_chat_message(text: str):
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
-    def send_progress(progress_text: str):
-        send_telegram(progress_text, bot_token, chat_id)
+    streamer = TelegramStreamer(bot_token, chat_id)
+    streamer.start("💭 Thinking...")
 
     try:
-        response_text = handle_message_with_agent(
+        handle_message_with_agent(
             anthropic_key,
-            text,
-            send_progress=send_progress
+            text or "",
+            streamer=streamer,
+            image_data=image_data,
         )
         volume.commit()
-
-        if response_text:
-            send_telegram(response_text, bot_token, chat_id)
     except Exception as e:
         logger.error(f"Chat processing error: {e}")
-        send_telegram("Sorry, I encountered an error processing your message.", bot_token, chat_id)
+        streamer.finalize("Sorry, I encountered an error processing your message.")
 
 
 @app.function(volumes={"/data": volume})
@@ -733,28 +732,18 @@ async def telegram_webhook(request: Request):
 
     response_text = None
 
-    # Check for photo message
+    # Check for photo message — route through the streaming agent like text
     photo = message.get("photo")
     if photo:
         file_id = photo[-1]["file_id"]
         caption = message.get("caption", "")
-
         try:
             image_data = download_telegram_photo(bot_token, file_id)
-            intervention = analyze_photo_with_claude(anthropic_key, image_data, caption)
-
-            if intervention == "NOT_AN_INTERVENTION":
-                response_text = "I couldn't identify a health intervention in that photo. Try adding a caption describing what it is."
-            else:
-                save_intervention_raw(intervention, intervention)
-                volume.commit()
-                response_text = format_intervention_response(anthropic_key, intervention)
         except Exception as e:
-            logger.error(f"Photo processing error: {e}")
-            response_text = "Sorry, I couldn't process that photo. Try sending a text description instead."
-
-        if response_text:
-            send_telegram(response_text, bot_token, chat_id)
+            logger.error(f"Photo download error: {e}")
+            send_telegram("Sorry, I couldn't download that photo. Try sending a text description instead.", bot_token, chat_id)
+            return {"ok": True}
+        process_chat_message.spawn(caption, image_data)
         return {"ok": True}
 
     if not text.strip():
@@ -766,7 +755,7 @@ async def telegram_webhook(request: Request):
             cleaned_text = clean_intervention_with_claude(anthropic_key, raw_text)
             save_intervention_raw(raw_text, cleaned_text)
             volume.commit()
-            response_text = format_intervention_response(anthropic_key, cleaned_text)
+            response_text = f"✓ Logged: {cleaned_text}"
         else:
             response_text = "Usage: /log <intervention>\nExamples:\n  /log magnesium 400mg\n  /log sauna 20min\n  /log 2 drinks of wine"
 

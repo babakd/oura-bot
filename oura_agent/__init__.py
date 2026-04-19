@@ -35,7 +35,6 @@ from oura_agent.prompts import (
     get_prompts_dir,
     load_prompt,
     SYSTEM_PROMPT,
-    CHAT_SYSTEM_PROMPT,
 )
 
 # Oura API
@@ -96,10 +95,7 @@ from oura_agent.telegram.client import (
 from oura_agent.claude.handlers import (
     generate_brief_with_claude,
     clean_intervention_with_claude,
-    handle_message,
-    format_intervention_response,
     analyze_photo_with_claude,
-    build_chat_context,
 )
 
 __all__ = [
@@ -126,7 +122,6 @@ __all__ = [
     "get_prompts_dir",
     "load_prompt",
     "SYSTEM_PROMPT",
-    "CHAT_SYSTEM_PROMPT",
     # Oura API
     "fetch_oura_data",
     "get_oura_daily_data",
@@ -163,8 +158,5 @@ __all__ = [
     # Claude
     "generate_brief_with_claude",
     "clean_intervention_with_claude",
-    "handle_message",
-    "format_intervention_response",
     "analyze_photo_with_claude",
-    "build_chat_context",
 ]

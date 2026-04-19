@@ -67,7 +67,7 @@ GitHub Actions runs tests on push/PR to main (`.github/workflows/test.yml`). Cov
 A personal health optimization agent that:
 1. Pulls biometric data from Oura Ring API daily at 10 AM EST
 2. Analyzes sleep, readiness, HRV against personal baselines
-3. Generates actionable recommendations using Claude Opus 4.5
+3. Generates actionable recommendations using Claude Opus 4.7 (with server-side code execution for real z-scores)
 4. Sends morning brief via Telegram
 5. Accepts intervention logging via Telegram (text, natural language, or photos)
 6. Answers questions about health data with full context (arbitrary chat)
@@ -77,8 +77,11 @@ A personal health optimization agent that:
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| AI Model | Claude Opus 4.5 (`claude-opus-4-5-20251101`) | Analysis & recommendations |
-| Extended Thinking | 10k token budget | Deep reasoning for morning briefs |
+| AI Model | Claude Opus 4.7 (`claude-opus-4-7`) | Analysis & recommendations |
+| Extended Thinking | Adaptive, `effort: high` | Deep reasoning for morning briefs + chat |
+| Prompt Caching | System prompts + tools (ephemeral) | Sub-second latency on chat turns after first |
+| Brief Code Execution | `code_execution_20250825` server tool | Real z-scores, correlations, rolling stats |
+| Chat Streaming | Telegram `editMessageText`, rate-limited | Incremental responses (no more spawn-wait) |
 | Hosting | Modal (serverless) | Daily cron execution |
 | Data Source | Oura Ring API | Biometric data |
 | Notifications | Telegram Bot API | Morning briefs + intervention logging |
@@ -104,7 +107,7 @@ oura_agent/                      # Git repository
 ├── modal_agent.py               # Main Modal function + agent logic
 ├── prompts/                     # System prompts (loaded at runtime)
 │   ├── morning_brief.md         # Morning brief generation prompt
-│   └── chat.md                  # Chat/intervention handling prompt
+│   └── agent.md                 # Agent system prompt (static — date injected separately for caching)
 ├── CLAUDE.md                    # This file - project context
 ├── profile.example.json         # User preferences template
 ├── requirements.txt             # Python dependencies

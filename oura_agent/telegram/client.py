@@ -2,6 +2,9 @@
 Telegram Bot API client with retry logic.
 """
 
+import time
+from typing import Optional
+
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -83,6 +86,157 @@ def download_telegram_photo(bot_token: str, file_id: str) -> bytes:
     )
     file_response.raise_for_status()
     return file_response.content
+
+
+def send_telegram_message(text: str, bot_token: str, chat_id: str) -> Optional[int]:
+    """Send a Telegram message and return the message_id (or None on failure).
+
+    Unlike send_telegram(), this does not chunk — the caller is responsible for
+    staying under Telegram's 4096-char cap. Used by the streaming path where we
+    need the message_id to edit later.
+    """
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+            },
+            timeout=30,
+        )
+        if not resp.ok:
+            # Fall back to plain text if markdown failed
+            if "can't parse entities" in resp.text:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+                    timeout=30,
+                )
+                if not resp.ok:
+                    logger.error(f"Telegram sendMessage failed: {resp.status_code} {resp.text}")
+                    return None
+            else:
+                logger.error(f"Telegram sendMessage failed: {resp.status_code} {resp.text}")
+                return None
+        data = resp.json()
+        return data.get("result", {}).get("message_id")
+    except Exception as e:
+        logger.error(f"send_telegram_message error: {e}")
+        return None
+
+
+def edit_telegram_message(
+    text: str,
+    message_id: int,
+    bot_token: str,
+    chat_id: str,
+) -> bool:
+    """Edit a previously-sent Telegram message. Returns True on success."""
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/editMessageText",
+            json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "disable_web_page_preview": True,
+            },
+            timeout=30,
+        )
+        if not resp.ok:
+            if "can't parse entities" in resp.text:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{bot_token}/editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "text": text,
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=30,
+                )
+                if not resp.ok:
+                    # "message is not modified" is benign
+                    if "not modified" in resp.text:
+                        return True
+                    logger.warning(f"Telegram editMessageText failed: {resp.status_code} {resp.text}")
+                    return False
+            else:
+                if "not modified" in resp.text:
+                    return True
+                logger.warning(f"Telegram editMessageText failed: {resp.status_code} {resp.text}")
+                return False
+        return True
+    except Exception as e:
+        logger.error(f"edit_telegram_message error: {e}")
+        return False
+
+
+class TelegramStreamer:
+    """Buffer text updates and edit a single Telegram message, rate-limited.
+
+    Telegram allows ~1 edit/sec per chat. This class batches `replace_text`
+    calls and only hits the API when enough time has elapsed. `finalize()`
+    forces a final edit regardless of timing.
+    """
+
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        min_edit_interval: float = 0.9,
+    ):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.min_edit_interval = min_edit_interval
+        self.message_id: Optional[int] = None
+        self._buffer = ""
+        self._last_edit_time = 0.0
+        self._last_sent_text = ""
+
+    def start(self, initial_text: str) -> None:
+        """Send the initial message. Stores message_id for subsequent edits."""
+        self.message_id = send_telegram_message(initial_text, self.bot_token, self.chat_id)
+        self._buffer = initial_text
+        self._last_sent_text = initial_text
+        self._last_edit_time = time.monotonic()
+
+    def replace_text(self, text: str) -> None:
+        """Replace the current buffer; edit if rate limit allows."""
+        self._buffer = text
+        self._maybe_edit()
+
+    def append_delta(self, delta: str) -> None:
+        """Append to the buffer; edit if rate limit allows."""
+        self._buffer += delta
+        self._maybe_edit()
+
+    def finalize(self, text: Optional[str] = None) -> None:
+        """Force a final edit with the given text (or current buffer)."""
+        if text is not None:
+            self._buffer = text
+        if self.message_id is None:
+            return
+        if self._buffer == self._last_sent_text:
+            return
+        edit_telegram_message(self._buffer, self.message_id, self.bot_token, self.chat_id)
+        self._last_sent_text = self._buffer
+        self._last_edit_time = time.monotonic()
+
+    def _maybe_edit(self) -> None:
+        if self.message_id is None:
+            return
+        now = time.monotonic()
+        if now - self._last_edit_time < self.min_edit_interval:
+            return
+        if self._buffer == self._last_sent_text:
+            return
+        edit_telegram_message(self._buffer, self.message_id, self.bot_token, self.chat_id)
+        self._last_sent_text = self._buffer
+        self._last_edit_time = now
 
 
 def _detect_image_mime_type(image_data: bytes) -> str:

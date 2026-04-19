@@ -13,12 +13,18 @@ def _ensure_conversations_dir():
     CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_conversation_history(limit: int = 20, today_only: bool = False) -> list:
+def load_conversation_history(
+    limit: int = 20,
+    today_only: bool = False,
+    days_back: int = None,
+) -> list:
     """Load recent conversation messages.
 
     Args:
-        limit: Maximum messages to return
-        today_only: If True, only return messages from today
+        limit: Maximum messages to return (most recent).
+        today_only: If True, only return messages from today (legacy flag).
+        days_back: If set, only return messages within the last N days
+            (relative to now). Takes precedence over today_only when both set.
     """
     from oura_agent.utils import now_nyc
 
@@ -28,7 +34,11 @@ def load_conversation_history(limit: int = 20, today_only: bool = False) -> list
     if not conv_file.exists():
         return []
 
-    today = now_nyc().strftime("%Y-%m-%d") if today_only else None
+    now = now_nyc()
+    today_str = now.strftime("%Y-%m-%d")
+    cutoff = None
+    if days_back is not None:
+        cutoff = now - timedelta(days=days_back)
 
     messages = []
     with open(conv_file) as f:
@@ -36,9 +46,16 @@ def load_conversation_history(limit: int = 20, today_only: bool = False) -> list
             if line.strip():
                 try:
                     msg = json.loads(line)
-                    if today_only:
-                        msg_date = msg.get("timestamp", "")[:10]  # YYYY-MM-DD
-                        if msg_date != today:
+                    ts_str = msg.get("timestamp", "")
+                    if cutoff is not None:
+                        try:
+                            ts = datetime.fromisoformat(ts_str)
+                            if ts < cutoff:
+                                continue
+                        except (ValueError, TypeError):
+                            continue
+                    elif today_only:
+                        if ts_str[:10] != today_str:
                             continue
                     messages.append(msg)
                 except json.JSONDecodeError:
@@ -87,7 +104,6 @@ def prune_conversation_history():
                 except (json.JSONDecodeError, KeyError, ValueError):
                     continue
 
-    # Rewrite file with only kept messages
     with open(conv_file, "w") as f:
         for msg in kept_messages:
             f.write(json.dumps(msg) + "\n")

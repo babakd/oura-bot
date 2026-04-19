@@ -54,7 +54,7 @@ BASELINES_FILE = DATA_DIR / "baselines.json"
 OURA_API_BASE = "https://api.ouraring.com/v2/usercollection"
 
 # Claude model
-CLAUDE_MODEL = "claude-opus-4-5-20251101"
+CLAUDE_MODEL = "claude-opus-4-7"
 
 # Data retention windows
 RAW_WINDOW_DAYS = 28  # Only used for raw API response pruning

@@ -38,8 +38,8 @@ class TestExecuteTool:
         assert "2026-01-14" in dates
         assert "2026-01-10" not in dates
 
-    def test_get_detailed_sleep_returns_data(self, temp_data_dir, mock_now_nyc):
-        """Test get_detailed_sleep returns detailed sleep data."""
+    def test_get_metrics_include_detailed_returns_sleep_detail(self, temp_data_dir, mock_now_nyc):
+        """get_metrics with include_detailed=True returns detailed_sleep for matched dates."""
         metrics_dir = temp_data_dir / "metrics"
         with open(metrics_dir / "2026-01-15.json", "w") as f:
             json.dump({
@@ -48,22 +48,18 @@ class TestExecuteTool:
                 "detailed_sleep": {
                     "bedtime_start": "2026-01-14T23:00:00",
                     "total_sleep_minutes": 450,
-                    "deep_sleep_pct": 18
-                }
+                    "deep_sleep_pct": 18,
+                },
             }, f)
 
-        result = agent.execute_tool("get_detailed_sleep", {"date": "2026-01-15"})
-
+        result = agent.execute_tool("get_metrics", {
+            "start_date": "2026-01-15",
+            "end_date": "2026-01-15",
+            "include_detailed": True,
+        })
         data = json.loads(result)
-        assert data["bedtime_start"] == "2026-01-14T23:00:00"
-        assert data["total_sleep_minutes"] == 450
-
-    def test_get_detailed_sleep_missing_date(self, temp_data_dir, mock_now_nyc):
-        """Test get_detailed_sleep returns error for missing date."""
-        result = agent.execute_tool("get_detailed_sleep", {"date": "2026-01-01"})
-
-        data = json.loads(result)
-        assert "error" in data
+        assert data[0]["detailed_sleep"]["bedtime_start"] == "2026-01-14T23:00:00"
+        assert data[0]["detailed_sleep"]["total_sleep_minutes"] == 450
 
     def test_get_interventions_filters_by_date(self, temp_data_dir, mock_now_nyc):
         """Test get_interventions filters by date range."""
@@ -120,15 +116,18 @@ class TestExecuteTool:
         assert len(entries) == 1
         assert entries[0]["cleaned"] == "Magnesium 2 capsules"
 
-    def test_get_today_interventions_returns_entries(self, temp_data_dir, mock_now_nyc):
-        """Test get_today_interventions returns today's entries."""
+    def test_get_interventions_today_range(self, temp_data_dir, mock_now_nyc):
+        """get_interventions with start==end==today replaces the old get_today_interventions tool."""
         modal_agent.save_intervention_raw("test 1", "Test intervention 1")
         modal_agent.save_intervention_raw("test 2", "Test intervention 2")
 
-        result = agent.execute_tool("get_today_interventions", {})
+        today = "2026-01-15"
+        result = agent.execute_tool("get_interventions", {"start_date": today, "end_date": today})
 
         data = json.loads(result)
-        assert len(data) == 2
+        assert today in data
+        entries = data[today]["entries"]
+        assert len(entries) == 2
 
     def test_get_recent_briefs_returns_briefs(self, temp_data_dir, mock_now_nyc):
         """Test get_recent_briefs returns brief content."""
@@ -380,20 +379,14 @@ class TestHandleMessageWithAgent:
 class TestAgentPrompt:
     """Tests for agent prompt loading."""
 
-    def test_prompt_includes_date(self, temp_data_dir, mock_now_nyc, monkeypatch):
-        """Test agent prompt includes current date."""
-        # Create a test prompt file
-        prompts_dir = temp_data_dir / "prompts"
-        prompts_dir.mkdir(exist_ok=True)
-        with open(prompts_dir / "agent.md", "w") as f:
-            f.write("Today is {current_date}. Help the user.")
-
-        from oura_agent import prompts
-        monkeypatch.setattr(prompts, "get_prompts_dir", lambda: prompts_dir)
-
-        prompt = agent._get_agent_prompt()
-
-        assert "2026-01-15" in prompt
+    def test_date_passed_via_system_blocks(self, temp_data_dir, mock_now_nyc):
+        """Date is carried in its own uncached system block, not baked into the prompt."""
+        blocks = agent._build_system_blocks("static prompt body")
+        assert len(blocks) == 2
+        assert blocks[0]["cache_control"]["type"] == "ephemeral"
+        assert blocks[0]["text"] == "static prompt body"
+        assert "2026-01-15" in blocks[1]["text"]
+        assert "cache_control" not in blocks[1]
 
     def test_missing_prompt_returns_empty(self, temp_data_dir, monkeypatch):
         """Test missing prompt file returns empty string."""
@@ -425,15 +418,13 @@ class TestToolDefinitions:
         assert "log_intervention" in tool_names
 
     def test_data_tools_exist(self):
-        """Test all expected data tools are defined."""
+        """Test expected data tools are defined (post-consolidation)."""
         tool_names = [t["name"] for t in agent.TOOLS]
         expected = [
             "get_metrics",
-            "get_detailed_sleep",
             "get_interventions",
             "get_baselines",
-            "get_today_interventions",
-            "get_recent_briefs"
+            "get_recent_briefs",
         ]
         for name in expected:
             assert name in tool_names

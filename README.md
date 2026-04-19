@@ -9,7 +9,9 @@ A personal health optimization agent that analyzes your Oura Ring data and sends
 - **Natural language logging** - "took magnesium", "20 min sauna", or send photos
 - **Intelligent chat agent** - ask anything about your health data with full historical context
 - **Intervention tracking** - correlates supplements/activities with sleep outcomes
-- **Claude Opus 4.5** with extended thinking for intelligent, context-aware analysis
+- **Claude Opus 4.7** with adaptive extended thinking + prompt caching for fast, context-aware analysis
+- **Streaming chat** — responses stream into a single Telegram message that edits as Claude thinks
+- **Server-side code execution** for the morning brief — Claude computes real z-scores and correlations, not estimates
 
 ###  Agent Capabilities
 
@@ -23,7 +25,7 @@ The chat agent uses Claude's tool use to dynamically query your health data: Ask
 
 | Component | Technology |
 |-----------|------------|
-| AI Model | Claude Opus 4.5 with extended thinking |
+| AI Model | Claude Opus 4.7 with adaptive extended thinking + prompt caching |
 | Hosting | Modal (serverless) |
 | Data Source | Oura Ring API |
 | Notifications | Telegram Bot |
@@ -42,7 +44,6 @@ oura-agent/
 │   └── claude/             # Claude AI handlers + agent with tools
 ├── prompts/                # System prompts
 │   ├── morning_brief.md    # Morning brief generation
-│   ├── chat.md             # Legacy chat handling
 │   └── agent.md            # Agent with tools for chat interactions
 ├── scripts/                # Utilities
 │   └── setup.py            # Interactive setup wizard
