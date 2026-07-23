@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from oura_agent.config import RECOMMENDATIONS_DIR, logger
+from oura_agent.insights import display_evidence_keys as rendered_evidence_keys
 from oura_agent.utils import now_nyc
 
 
@@ -27,6 +28,7 @@ OUTCOME_METRICS = {
     "hrv",
     "resting_hr",
     "deep_sleep_minutes",
+    "rem_sleep_minutes",
     "total_sleep_minutes",
     "sleep_efficiency",
 }
@@ -115,6 +117,19 @@ def save_daily_card(
     fallback_used: bool = False,
 ) -> dict:
     """Append a generated daily card and its structured recommendation."""
+    primary_evidence_keys = [
+        key
+        for key in card.get("evidence_keys", [])
+        if key in packet.get("metrics", {})
+    ]
+    display_keys = [
+        key
+        for key in card.get(
+            "display_evidence_keys",
+            rendered_evidence_keys(card, packet),
+        )
+        if key in packet.get("metrics", {})
+    ]
     entry = {
         "type": "card",
         "id": _card_id(date),
@@ -126,8 +141,19 @@ def save_daily_card(
         "domain": card.get("action_domain"),
         "reason": [
             packet.get("metrics", {}).get(key, {}).get("evidence")
-            for key in card.get("evidence_keys", [])
+            for key in primary_evidence_keys
             if packet.get("metrics", {}).get(key, {}).get("evidence")
+        ],
+        "primary_evidence_keys": primary_evidence_keys,
+        "display_evidence_keys": display_keys,
+        "display_evidence": [
+            {
+                "key": key,
+                "current": packet["metrics"][key].get("current"),
+                "source_date": packet["metrics"][key].get("source_date"),
+                "source": packet["metrics"][key].get("source"),
+            }
+            for key in display_keys
         ],
         "confidence": card.get("confidence"),
         "expected_outcome": card.get("expected_outcome"),

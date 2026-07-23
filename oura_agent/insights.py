@@ -50,6 +50,14 @@ METRICS: dict[str, dict[str, Any]] = {
         "importance": 0.85,
         "domain": "sleep_quality",
     },
+    "rem_sleep_minutes": {
+        "label": "REM sleep",
+        "unit": " min",
+        "direction": 1,
+        "importance": 0.75,
+        "domain": "sleep_quality",
+        "decision_metric": False,
+    },
     "total_sleep_minutes": {
         "label": "Total sleep",
         "unit": " min",
@@ -87,11 +95,21 @@ METRICS: dict[str, dict[str, Any]] = {
     },
 }
 
-CARD_MAX_CHARS = 900
+CARD_MAX_CHARS = 1200
 MIN_PERSONAL_BASELINE_N = 7
+SNAPSHOT_GROUPS = (
+    ("sleep_score", "readiness"),
+    ("total_sleep_minutes", "deep_sleep_minutes", "rem_sleep_minutes"),
+    ("hrv", "resting_hr"),
+)
 CANONICAL_ACTION_DOMAINS = sorted(
     {config["domain"] for config in METRICS.values()}
     | {"data_quality", "no_action"}
+)
+DECISION_METRIC_KEYS = sorted(
+    key
+    for key, config in METRICS.items()
+    if config.get("decision_metric", True)
 )
 
 
@@ -274,6 +292,7 @@ def build_daily_insight_packet(
             "unit": config["unit"],
             "domain": config["domain"],
             "direction": config["direction"],
+            "decision_metric": config.get("decision_metric", True),
             "source_date": source_date,
             "source": source,
             "current": _round(current),
@@ -287,6 +306,7 @@ def build_daily_insight_packet(
             "direction_adjusted_z": _round(direction_adjusted_z, 2),
             "personal_percentile": _percentile(current, prior_values[-60:]),
             "recent_7_average": _round(statistics.mean(recent) if recent else None),
+            "recent_7_count": len(recent),
             "recent_7_slope_per_day": _round(slope, 2),
             "polarity": polarity,
         }
@@ -297,27 +317,33 @@ def build_daily_insight_packet(
         trend_strength = 0
         if slope is not None and std is not None and std > 0:
             trend_strength = min(abs(slope) / std, 1.5)
-        candidates.append(
-            {
-                "metric_key": key,
-                "domain": config["domain"],
-                "polarity": polarity,
-                "source_date": source_date,
-                "source": source,
-                "priority": round(config["importance"] * (anomaly + 0.35 * trend_strength), 3),
-                "evidence": row["evidence"],
-            }
-        )
+        if row["decision_metric"]:
+            candidates.append(
+                {
+                    "metric_key": key,
+                    "domain": config["domain"],
+                    "polarity": polarity,
+                    "source_date": source_date,
+                    "source": source,
+                    "priority": round(
+                        config["importance"] * (anomaly + 0.35 * trend_strength),
+                        3,
+                    ),
+                    "evidence": row["evidence"],
+                }
+            )
 
     candidates.sort(key=lambda item: item["priority"], reverse=True)
     concerning = [
         row for row in metric_rows.values()
-        if row.get("direction_adjusted_z") is not None
+        if row.get("decision_metric", True)
+        and row.get("direction_adjusted_z") is not None
         and row["direction_adjusted_z"] <= -1
     ]
     strong = [
         row for row in metric_rows.values()
-        if row.get("direction_adjusted_z") is not None
+        if row.get("decision_metric", True)
+        and row.get("direction_adjusted_z") is not None
         and row["direction_adjusted_z"] >= 1
     ]
 
@@ -411,6 +437,11 @@ def default_card_from_packet(packet: dict) -> dict:
         for candidate in candidates
         if candidate.get("polarity") == "caution"
     ]
+    strong_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("polarity") == "positive"
+    ]
     top = (
         caution_candidates[0]
         if state == "caution" and caution_candidates
@@ -482,10 +513,36 @@ def default_card_from_packet(packet: dict) -> dict:
             "expected_outcome": "avoid overreacting while checking whether the signal persists",
         }
 
+    if state == "strong" and strong_candidates:
+        label = METRICS.get(
+            strong_candidates[0]["metric_key"], {}
+        ).get("label", "Recovery")
+        return {
+            "headline": f"{label} is notably strong",
+            "observation": (
+                "At least one verified signal is above your personal range, "
+                "with no meaningful caution signal present. That supports the "
+                "normal plan without requiring extra intensity."
+            ),
+            "decision": "Follow your normal plan.",
+            "action_domain": "no_action",
+            "evidence_keys": [
+                item["metric_key"] for item in strong_candidates[:2]
+            ],
+            "confidence": "medium",
+            "no_action": True,
+            "review_after": "tomorrow",
+            "expected_outcome": "maintain the routine without manufacturing an intervention",
+        }
+
     evidence_keys = [item["metric_key"] for item in candidates[:2]]
     return {
         "headline": "Nothing unusual today",
-        "observation": "Your strongest available signals are within a range that does not justify changing the plan.",
+        "observation": (
+            "Your main recovery and sleep signals are close to your personal "
+            "range, with no verified signal strong enough to justify changing "
+            "the plan."
+        ),
         "decision": "Follow your normal plan.",
         "action_domain": "no_action",
         "evidence_keys": evidence_keys,
@@ -516,9 +573,14 @@ def validate_model_card(card: dict, packet: dict) -> None:
     ):
         raise ValueError("evidence_keys must be a list of strings")
 
-    allowed_metrics = packet.get("metrics", {})
+    packet_metrics = packet.get("metrics", {})
+    allowed_metrics = {
+        key: metric
+        for key, metric in packet_metrics.items()
+        if metric.get("decision_metric", True)
+    }
     if any(key not in allowed_metrics for key in raw_keys):
-        raise ValueError("daily card contains an unknown evidence key")
+        raise ValueError("daily card contains an unknown or display-only evidence key")
 
     no_action = card.get("no_action")
     if not isinstance(no_action, bool):
@@ -552,7 +614,11 @@ def normalize_card(card: dict, packet: dict) -> dict:
     ):
         card = fallback
 
-    allowed_keys = set(packet.get("metrics", {}))
+    allowed_keys = {
+        key
+        for key, metric in packet.get("metrics", {}).items()
+        if metric.get("decision_metric", True)
+    }
     raw_evidence_keys = card.get("evidence_keys", [])
     invalid_evidence = (
         not isinstance(raw_evidence_keys, list)
@@ -618,7 +684,7 @@ def normalize_card(card: dict, packet: dict) -> dict:
 
     normalized = {
         "headline": _plain_text(card.get("headline") or fallback["headline"], 72),
-        "observation": _plain_text(card.get("observation") or fallback["observation"], 260),
+        "observation": _plain_text(card.get("observation") or fallback["observation"], 360),
         "decision": _plain_text(card.get("decision") or fallback["decision"], 190),
         "action_domain": expected_domain,
         "evidence_keys": evidence_keys or fallback["evidence_keys"],
@@ -639,31 +705,255 @@ def normalize_card(card: dict, packet: dict) -> dict:
         normalized["decision"] = "Follow your normal plan."
         normalized["no_action"] = True
         normalized["action_domain"] = "no_action"
+    if (
+        packet.get("state") == "typical"
+        and packet.get("freshness", {}).get("data_quality") == "partial"
+    ):
+        normalized["headline"] = "No concern in the available data"
+    normalized["display_evidence_keys"] = display_evidence_keys(
+        normalized,
+        packet,
+    )
     return normalized
+
+
+def display_evidence_keys(card: dict, packet: dict) -> list[str]:
+    """Return every metric key whose value the renderer will show."""
+    if packet.get("state") in {"data_unavailable", "sleep_missing"}:
+        return []
+
+    metrics = packet.get("metrics", {})
+    keys: list[str] = []
+    for group in SNAPSHOT_GROUPS:
+        for key in group:
+            if key in metrics and key not in keys:
+                keys.append(key)
+    if packet.get("state") != "baseline_building":
+        for key in card.get("evidence_keys", []):
+            if key in metrics and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _compact_number(value: Any) -> str | None:
+    numeric = _number(value)
+    if numeric is None:
+        return None
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.1f}"
+
+
+def _duration_label(value: Any, suffix: str) -> str | None:
+    numeric = _number(value)
+    if numeric is None:
+        return None
+    if numeric >= 60 and suffix in {"total", "per night"}:
+        rounded = int(round(numeric))
+        hours, minutes = divmod(rounded, 60)
+        return f"{hours}h {minutes}m {suffix}"
+    shown = _compact_number(numeric)
+    return f"{shown}m {suffix}" if shown is not None else None
+
+
+def _snapshot_fact(key: str, metric: dict) -> str | None:
+    """Format one compact, deterministic morning snapshot fact."""
+    value = metric.get("current")
+    if key == "total_sleep_minutes":
+        return _duration_label(value, "total")
+    if key == "deep_sleep_minutes":
+        return _duration_label(value, "deep")
+    if key == "rem_sleep_minutes":
+        return _duration_label(value, "REM")
+
+    shown = _compact_number(value)
+    if shown is None:
+        return None
+    if key == "sleep_score":
+        return f"Sleep {shown}"
+    if key == "readiness":
+        return f"Readiness {shown}"
+    if key == "hrv":
+        return f"HRV {shown} ms"
+    if key == "resting_hr":
+        return f"Resting HR {shown} bpm"
+    return None
+
+
+def _snapshot_lines(packet: dict) -> list[str]:
+    if packet.get("state") in {"data_unavailable", "sleep_missing"}:
+        return []
+
+    metrics = packet.get("metrics", {})
+    lines = []
+    for group in SNAPSHOT_GROUPS:
+        facts = [
+            fact
+            for key in group
+            if key in metrics
+            for fact in [_snapshot_fact(key, metrics[key])]
+            if fact is not None
+        ]
+        if facts:
+            lines.append(" · ".join(facts))
+    return lines
+
+
+def _recent_context(card: dict, packet: dict) -> str | None:
+    """Describe one recent average without implying consecutive calendar days."""
+    metrics = packet.get("metrics", {})
+    for key in card.get("evidence_keys", []):
+        metric = metrics.get(key, {})
+        count = metric.get("recent_7_count")
+        average = metric.get("recent_7_average")
+        if not isinstance(count, int) or count < 3 or _number(average) is None:
+            continue
+
+        current = metric.get("current")
+        if key == "total_sleep_minutes":
+            average_label = _duration_label(average, "per night")
+            current_label = _duration_label(current, "today")
+        else:
+            average_label = _fmt_value(average, metric.get("unit", ""))
+            current_label = _fmt_value(current, metric.get("unit", ""))
+
+        current_number = _number(current)
+        average_number = _number(average)
+        std = _number(metric.get("baseline_std"))
+        tolerance = (
+            0.5 * std
+            if std is not None and std > 0
+            else max(abs(average_number or 0) * 0.05, 1)
+        )
+        in_line = (
+            current_number is not None
+            and average_number is not None
+            and abs(current_number - average_number) <= tolerance
+        )
+        if in_line:
+            detail = (
+                f"is in line with its {average_label} average across "
+                f"{count} recent observations"
+            )
+        else:
+            detail = (
+                f"is {current_label} today versus a recent average of "
+                f"{average_label} across {count} observations"
+            )
+        return f"*Recent context:* {metric.get('label', key)} {detail}."
+    return None
+
+
+_ENDPOINT_LABELS = {
+    "daily_sleep": "sleep score",
+    "daily_readiness": "readiness",
+    "daily_activity": "activity",
+    "sleep": "sleep detail",
+    "daily_stress": "stress",
+    "heartrate": "daytime HR",
+    "workout": "workouts",
+}
+
+
+def _freshness_issues(packet: dict) -> list[str]:
+    endpoints = packet.get("freshness", {}).get("endpoints", {})
+    if not isinstance(endpoints, dict):
+        return []
+
+    issues = []
+    for endpoint, status in endpoints.items():
+        if not isinstance(status, dict):
+            continue
+        label = _ENDPOINT_LABELS.get(endpoint, endpoint.replace("_", " "))
+        if status.get("stale"):
+            issue = f"{label} stale"
+        elif (
+            status.get("required")
+            and status.get("ok") is True
+            and status.get("count") == 0
+        ):
+            issue = f"{label} not ready"
+        elif status.get("ok") is False:
+            issue = f"{label} unavailable"
+        else:
+            continue
+        if issue not in issues:
+            issues.append(issue)
+    return issues
+
+
+def _activity_freshness_label(packet: dict) -> str | None:
+    source_dates = sorted(
+        {
+            metric.get("source_date")
+            for metric in packet.get("metrics", {}).values()
+            if (
+                isinstance(metric, dict)
+                and metric.get("source") == "activity"
+                and re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}",
+                    str(metric.get("source_date", "")),
+                )
+            )
+        }
+    )
+    if not source_dates:
+        return None
+
+    today = packet.get("date")
+    if len(source_dates) == 1 and re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}",
+        str(today or ""),
+    ):
+        source_date = source_dates[0]
+        try:
+            source_day = datetime.strptime(source_date, "%Y-%m-%d").date()
+            current_day = datetime.strptime(today, "%Y-%m-%d").date()
+            age = (current_day - source_day).days
+            if age == 0:
+                return "today’s activity included"
+            if age == 1:
+                return "yesterday’s activity included"
+        except ValueError:
+            pass
+        return f"{source_date} activity included"
+    return "dated activity included"
 
 
 def _freshness_label(packet: dict) -> str:
     freshness = packet.get("freshness", {})
     ended = freshness.get("sleep_session_ended_at")
     quality = freshness.get("data_quality", "unknown")
-    stale = bool(freshness.get("has_stale_sources"))
+    parts = []
     if ended:
         try:
             parsed = datetime.fromisoformat(ended.replace("Z", "+00:00"))
             time_label = parsed.strftime("%-I:%M %p")
-            label = f"Oura through {time_label}"
-            if stale:
-                return f"{label} · stale/partial"
-            if quality != "complete":
-                return f"{label} · {quality}"
-            return label
+            parts.append(f"Sleep through {time_label}")
         except (TypeError, ValueError):
             pass
-    return f"Data {quality}"
+    has_sleep_cutoff = bool(parts)
+    if not has_sleep_cutoff:
+        if quality == "failed":
+            parts.append("Data unavailable")
+        elif quality != "complete":
+            parts.append("Partial data")
+        else:
+            parts.append("Data complete")
+
+    activity_label = _activity_freshness_label(packet)
+    if activity_label:
+        parts.append(activity_label)
+
+    if has_sleep_cutoff and quality == "failed":
+        parts.append("data unavailable")
+    elif has_sleep_cutoff and quality != "complete":
+        parts.append("partial data")
+    return " · ".join(parts)
 
 
 def render_daily_card(card: dict, packet: dict, max_chars: int = CARD_MAX_CHARS) -> str:
-    """Render one legacy-Markdown Telegram message under the product cap."""
+    """Render one adaptive legacy-Markdown Telegram message under the product cap."""
     card = normalize_card(card, packet)
     icon = {
         "data_unavailable": "↻",
@@ -674,41 +964,124 @@ def render_daily_card(card: dict, packet: dict, max_chars: int = CARD_MAX_CHARS)
         "typical": "○",
     }.get(packet.get("state"), "○")
 
-    evidence = []
     metrics = packet.get("metrics", {})
+    evidence = []
     for key in card["evidence_keys"]:
         if key in metrics:
             evidence.append(metrics[key]["evidence"])
-
-    lines = [
-        f"*{icon} {card['headline']}*",
-        card["observation"],
-        "",
-        f"*Today:* {card['decision']}",
-    ]
-    if evidence:
-        lines.extend(["", "*Signals:* " + " · ".join(evidence)])
-    lines.extend(
-        [
-            "",
-            f"_{card['confidence'].capitalize()} confidence · {_freshness_label(packet)}_",
-        ]
+    if packet.get("state") == "baseline_building":
+        evidence = []
+    snapshots = _snapshot_lines(packet)
+    recent = (
+        None
+        if packet.get("state") == "baseline_building"
+        else _recent_context(card, packet)
     )
-    rendered = "\n".join(lines).strip()
+    data_issues = _freshness_issues(packet)
+    data_note = " · ".join(data_issues[:2]) if data_issues else None
+    show_recheck = (
+        not card["no_action"]
+        or packet.get("state") == "baseline_building"
+    )
+    recheck = card.get("review_after") if show_recheck else None
+    if recheck:
+        recheck = recheck.rstrip(".!?")
+        recheck = recheck[0].upper() + recheck[1:]
+        if packet.get("state") == "caution":
+            recheck = f"{recheck} — see whether the signal persists"
+
+    footer = (
+        f"_{card['confidence'].capitalize()} confidence · "
+        f"{_freshness_label(packet)}_"
+    )
+    context_label = (
+        "Data status"
+        if packet.get("state") in {"data_unavailable", "sleep_missing"}
+        else "What stands out"
+    )
+    def compose(
+        *,
+        headline: str,
+        observation: str,
+        decision: str,
+        snapshot_rows: list[str],
+        data_note_line: str | None,
+        evidence_rows: list[str],
+        recent_line: str | None,
+        recheck_line: str | None,
+    ) -> str:
+        lines = [f"*{icon} {headline}*"]
+        if snapshot_rows:
+            lines.extend(["", "*Morning snapshot*", *snapshot_rows])
+        if data_note_line:
+            lines.extend(
+                ["", f"*Data note:* {data_note_line[0].upper() + data_note_line[1:]}."]
+            )
+        lines.extend(["", f"*{context_label}:* {observation}"])
+        if evidence_rows:
+            lines.extend(f"• {item}" for item in evidence_rows)
+        if recent_line:
+            lines.extend(["", recent_line])
+        lines.extend(["", f"*Today:* {decision}"])
+        if recheck_line:
+            lines.extend(["", f"*Recheck:* {recheck_line}."])
+        lines.extend(["", footer])
+        return "\n".join(lines).strip()
+
+    rendered = compose(
+        headline=card["headline"],
+        observation=card["observation"],
+        decision=card["decision"],
+        snapshot_rows=snapshots,
+        data_note_line=data_note,
+        evidence_rows=evidence,
+        recent_line=recent,
+        recheck_line=recheck,
+    )
     if len(rendered) <= max_chars:
         return rendered
 
-    # Defensive fallback: preserve the decision and factual first signal.
-    compact = [
-        f"*{icon} {_plain_text(card['headline'], 56)}*",
-        _plain_text(card["observation"], 180),
-        "",
-        f"*Today:* {_plain_text(card['decision'], 150)}",
-    ]
-    if evidence:
-        compact.extend(["", "*Signal:* " + evidence[0]])
-    compact.extend(["", f"_{card['confidence'].capitalize()} confidence · {_freshness_label(packet)}_"])
-    rendered = "\n".join(compact).strip()
+    # Remove optional context before shortening the core interpretation. Keep
+    # all deterministic facts at the production cap so the ledger's displayed
+    # evidence list remains an exact audit of what the user saw.
+    rendered = compose(
+        headline=card["headline"],
+        observation=card["observation"],
+        decision=card["decision"],
+        snapshot_rows=snapshots,
+        data_note_line=data_note,
+        evidence_rows=evidence,
+        recent_line=None,
+        recheck_line=recheck,
+    )
+    if len(rendered) <= max_chars:
+        return rendered
+
+    rendered = compose(
+        headline=_plain_text(card["headline"], 64),
+        observation=_plain_text(card["observation"], 240),
+        decision=_plain_text(card["decision"], 160),
+        snapshot_rows=snapshots,
+        data_note_line=data_note,
+        evidence_rows=evidence,
+        recent_line=None,
+        recheck_line=recheck,
+    )
+    if len(rendered) <= max_chars:
+        return rendered
+
+    # Defensive final compaction preserves the decision, primary comparison,
+    # essential snapshot, and freshness.
+    rendered = compose(
+        headline=_plain_text(card["headline"], 56),
+        observation=_plain_text(card["observation"], 180),
+        decision=_plain_text(card["decision"], 150),
+        snapshot_rows=snapshots[:1],
+        data_note_line=data_note,
+        evidence_rows=evidence[:1],
+        recent_line=None,
+        recheck_line=None,
+    )
     if len(rendered) > max_chars:
         raise ValueError(f"Daily card exceeds {max_chars} characters after compaction")
     return rendered

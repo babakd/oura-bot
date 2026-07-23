@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from oura_agent.insights import (
+    CARD_MAX_CHARS,
     build_daily_insight_packet,
     default_card_from_packet,
     normalize_card,
@@ -31,6 +32,8 @@ def _packet(
         "hrv": 47,
         "resting_hr": 52,
         "deep_sleep_minutes": 67,
+        "rem_sleep_minutes": 92,
+        "total_sleep_minutes": 412,
         "sleep_recorded": sleep_recorded,
     }
     metrics.update(current or {})
@@ -43,6 +46,8 @@ def _packet(
                 "hrv": 44 + day % 8,
                 "resting_hr": 50 + day % 5,
                 "deep_sleep_minutes": 58 + day,
+                "rem_sleep_minutes": 88 + day % 12,
+                "total_sleep_minutes": 390 + day * 2,
             },
         }
         for day in range(1, 15)
@@ -61,16 +66,22 @@ def _packet(
     )
 
 
-def test_normal_day_allows_no_action_and_is_short(sample_baselines):
+def test_normal_day_is_compact_but_informative(sample_baselines):
     packet = _packet(sample_baselines)
     card = normalize_card(default_card_from_packet(packet), packet)
     rendered = render_daily_card(card, packet)
 
     assert packet["state"] == "typical"
     assert card["no_action"] is True
+    assert len(card["evidence_keys"]) <= 2
+    assert "*Morning snapshot*" in rendered
+    assert "Sleep 76 · Readiness 73" in rendered
+    assert "6h 52m total · 67m deep · 92m REM" in rendered
+    assert "HRV 47 ms · Resting HR 52 bpm" in rendered
+    assert "*Recent context:*" in rendered
     assert "Follow your normal plan" in rendered
-    assert len(rendered) <= 900
-    assert "Oura through 7:15 AM" in rendered
+    assert len(rendered) <= CARD_MAX_CHARS
+    assert "Sleep through 7:15 AM" in rendered
 
 
 def test_population_defaults_are_never_presented_as_personal_baseline():
@@ -98,6 +109,8 @@ def test_population_defaults_are_never_presented_as_personal_baseline():
     assert card["no_action"] is True
     assert "Building your personal baseline" in rendered
     assert "vs usual" not in rendered
+    assert "•" not in rendered
+    assert "*Recent context:*" not in rendered
 
 
 def test_caution_card_uses_deterministic_numbers(sample_baselines):
@@ -112,7 +125,8 @@ def test_caution_card_uses_deterministic_numbers(sample_baselines):
     assert card["no_action"] is False
     assert "vs usual" in rendered
     assert "diagnosis" in rendered
-    assert len(rendered) <= 900
+    assert "*Recheck:* Tomorrow — see whether the signal persists." in rendered
+    assert len(rendered) <= CARD_MAX_CHARS
 
 
 def test_caution_fallback_chooses_caution_not_larger_positive_anomaly(
@@ -169,6 +183,11 @@ def test_missing_sleep_does_not_infer_deprivation(sample_baselines):
     assert "not inferring recovery" in rendered
     assert "/regen-brief" in rendered
     assert "sleep deprivation" not in rendered.lower()
+
+    packet["freshness"]["sleep_session_ended_at"] = None
+    no_cutoff = render_daily_card(card, packet)
+    assert no_cutoff.count("Partial data") == 1
+    assert "Data partial" not in no_cutoff
 
 
 def test_invalid_model_evidence_rejects_the_whole_selection(sample_baselines):
@@ -234,6 +253,7 @@ def test_yesterday_activity_keeps_its_source_date_and_is_not_duplicated(
 def test_required_empty_endpoint_is_partial_and_visible(sample_baselines):
     packet = _packet(
         sample_baselines,
+        current={"readiness": None},
         fetch_status={
             "daily_sleep": {"ok": True, "count": 1, "required": True},
             "daily_readiness": {"ok": True, "count": 0, "required": True},
@@ -258,7 +278,15 @@ def test_required_empty_endpoint_is_partial_and_visible(sample_baselines):
     assert packet["freshness"]["required_empty_endpoints"] == ["daily_readiness"]
     assert normalized["confidence"] == "medium"
     assert normalized["decision"] == "Follow your normal plan."
-    assert "Oura through 7:15 AM · partial" in rendered
+    assert normalized["headline"] == "No concern in the available data"
+    snapshot = rendered.split("*Morning snapshot*", 1)[1].split(
+        "*Data note:*",
+        1,
+    )[0]
+    assert "Readiness" not in snapshot
+    assert "*○ No concern in the available data*" in rendered
+    assert "*Data note:* Readiness not ready." in rendered
+    assert "Sleep through 7:15 AM · partial data" in rendered
 
 
 def test_stale_source_is_explicit_in_freshness_label(sample_baselines):
@@ -278,7 +306,198 @@ def test_stale_source_is_explicit_in_freshness_label(sample_baselines):
     rendered = render_daily_card(default_card_from_packet(packet), packet)
 
     assert packet["freshness"]["data_quality"] == "partial"
-    assert "stale/partial" in rendered
+    assert "*Data note:* Sleep detail stale." in rendered
+    assert "partial data" in rendered
+
+
+def test_optional_empty_endpoint_is_not_reported_as_missing(sample_baselines):
+    packet = _packet(
+        sample_baselines,
+        fetch_status={
+            "daily_sleep": {"ok": True, "count": 1, "required": True},
+            "daily_readiness": {"ok": True, "count": 1, "required": True},
+            "sleep": {"ok": True, "count": 1, "required": True},
+            "workout": {"ok": True, "count": 0, "required": False},
+            "heartrate": {"ok": True, "count": 0, "required": False},
+        },
+    )
+    rendered = render_daily_card(default_card_from_packet(packet), packet)
+
+    assert packet["freshness"]["data_quality"] == "complete"
+    assert "workouts not ready" not in rendered
+    assert "daytime HR not ready" not in rendered
+    assert "*Data note:*" not in rendered
+
+
+def test_snapshot_preserves_valid_zeroes_and_omits_missing_values(
+    sample_baselines,
+):
+    zero_packet = _packet(
+        sample_baselines,
+        current={
+            "total_sleep_minutes": 0,
+            "deep_sleep_minutes": 0,
+            "rem_sleep_minutes": 0,
+        },
+    )
+    zero_rendered = render_daily_card(
+        default_card_from_packet(zero_packet),
+        zero_packet,
+    )
+    assert "0m total · 0m deep · 0m REM" in zero_rendered
+
+    missing_packet = _packet(
+        sample_baselines,
+        current={"rem_sleep_minutes": None},
+    )
+    missing_rendered = render_daily_card(
+        default_card_from_packet(missing_packet),
+        missing_packet,
+    )
+    snapshot = missing_rendered.split("*Morning snapshot*", 1)[1].split(
+        "*What stands out:*",
+        1,
+    )[0]
+    assert "REM" not in snapshot
+
+
+def test_recent_context_requires_three_recorded_observations(sample_baselines):
+    packet = build_daily_insight_packet(
+        "2026-01-15",
+        {
+            "sleep_score": 76,
+            "readiness": 73,
+            "hrv": 47,
+            "resting_hr": 52,
+            "total_sleep_minutes": 412,
+            "sleep_recorded": True,
+        },
+        {"bedtime_end": "2026-01-15T07:15:00-05:00"},
+        [],
+        sample_baselines,
+    )
+    rendered = render_daily_card(default_card_from_packet(packet), packet)
+
+    assert packet["metrics"]["sleep_score"]["recent_7_count"] == 1
+    assert "*Recent context:*" not in rendered
+
+
+def test_strong_fallback_acknowledges_positive_signals(sample_baselines):
+    packet = _packet(
+        sample_baselines,
+        current={
+            "sleep_score": 95,
+            "readiness": 88,
+            "hrv": 58,
+            "resting_hr": 48,
+            "deep_sleep_minutes": 85,
+            "rem_sleep_minutes": 120,
+            "total_sleep_minutes": 470,
+        },
+    )
+    card = default_card_from_packet(packet)
+    rendered = render_daily_card(card, packet)
+
+    assert packet["state"] == "strong"
+    assert card["headline"] != "Nothing unusual today"
+    assert "above your personal range" in rendered
+    assert card["no_action"] is True
+    assert "*Recheck:*" not in rendered
+
+
+def test_activity_provenance_is_visible_in_freshness(sample_baselines):
+    packet = _packet(
+        sample_baselines,
+        current={"stress_high": 40},
+        metric_provenance={
+            "stress_high": {
+                "source_date": "2026-01-14",
+                "source": "activity",
+            }
+        },
+    )
+    rendered = render_daily_card(default_card_from_packet(packet), packet)
+
+    assert "yesterday’s activity included" in rendered
+
+    older_packet = _packet(
+        sample_baselines,
+        current={"stress_high": 40},
+        metric_provenance={
+            "stress_high": {
+                "source_date": "2026-01-12",
+                "source": "activity",
+            }
+        },
+    )
+    older_rendered = render_daily_card(
+        default_card_from_packet(older_packet),
+        older_packet,
+    )
+    assert "2026-01-12 activity included" in older_rendered
+    assert "yesterday’s activity included" not in older_rendered
+
+
+def test_rem_is_informational_not_a_decision_trigger(sample_baselines):
+    packet = _packet(
+        sample_baselines,
+        current={"rem_sleep_minutes": 20},
+    )
+    card = default_card_from_packet(packet)
+    rendered = render_daily_card(card, packet)
+
+    assert packet["metrics"]["rem_sleep_minutes"]["polarity"] == "caution"
+    assert packet["metrics"]["rem_sleep_minutes"]["decision_metric"] is False
+    assert packet["state"] == "typical"
+    assert "rem_sleep_minutes" not in {
+        item["metric_key"] for item in packet["ranked_candidates"]
+    }
+    assert "20m REM" in rendered
+
+    invalid = {
+        "headline": "REM is the caveat",
+        "observation": "Use a flexible day.",
+        "decision": "Let your plan and subjective energy guide intensity.",
+        "action_domain": "sleep_quality",
+        "evidence_keys": ["rem_sleep_minutes"],
+        "confidence": "medium",
+        "no_action": False,
+        "review_after": "tomorrow",
+        "expected_outcome": "observe what follows",
+    }
+    with pytest.raises(ValueError, match="display-only"):
+        validate_model_card(invalid, packet)
+
+
+def test_long_card_compacts_without_losing_core_decision(sample_baselines):
+    packet = _packet(
+        sample_baselines,
+        current={"hrv": 30, "readiness": 55},
+    )
+    card = normalize_card(
+        {
+            "headline": "Recovery needs a measured and flexible interpretation today",
+            "observation": " ".join(
+                ["This verified caution deserves context without overreaction."] * 8
+            ),
+            "decision": " ".join(
+                ["Keep the day flexible and use energy and soreness as checks."] * 5
+            ),
+            "action_domain": "recovery",
+            "evidence_keys": ["hrv", "readiness"],
+            "confidence": "medium",
+            "no_action": False,
+            "review_after": "tomorrow",
+            "expected_outcome": "observe whether the signal persists",
+        },
+        packet,
+    )
+    rendered = render_daily_card(card, packet, max_chars=650)
+
+    assert len(rendered) <= 650
+    assert "*Today:*" in rendered
+    assert "HRV 30 ms vs usual" in rendered
+    assert "Sleep through 7:15 AM" in rendered
 
 
 def test_no_action_and_domain_invariants_reject_model_contradictions(
@@ -352,6 +571,11 @@ def test_feedback_ledger_is_append_only_and_idempotent(
     assert first == duplicate
     assert summary["feedback_counts"]["not_for_me"] == 1
     assert entry["domain"] in summary["not_for_me_domains"]
+    assert entry["primary_evidence_keys"] == card["evidence_keys"]
+    assert entry["display_evidence_keys"] == card["display_evidence_keys"]
+    assert {
+        item["key"] for item in entry["display_evidence"]
+    } == set(card["display_evidence_keys"])
     assert len(recommendations.load_ledger()) == 2
     assert not recommendations.LEDGER_FILE.exists()
     assert len(list((ledger_dir / "events").glob("*.json"))) == 2
@@ -500,7 +724,7 @@ def test_structured_card_generation_and_fable_refusal_fallback(
     assert result.fallback_used is True
     assert result.model == "claude-opus-4-8"
     assert result.card["no_action"] is True
-    assert len(result.text) <= 900
+    assert len(result.text) <= CARD_MAX_CHARS
 
 
 def test_missing_sleep_bypasses_model_and_serves_safe_card(
@@ -601,9 +825,12 @@ def test_model_numbers_are_discarded_from_prose(monkeypatch, sample_baselines):
     )
     result = brief_card.generate_daily_card("test-key", packet)
 
-    # The only numbers left are computed in the deterministic Signals line.
-    prose = result.text.split("*Signals:*", 1)[0]
-    assert not any(character.isdigit() for character in prose)
+    assert "Readiness is 99" not in result.text
+    assert "400 percent" not in result.text
+    assert "Run 20 miles" not in result.text
+    assert "Gain 10 points" not in result.text
+    assert "HRV 30 ms vs usual" in result.text
+    assert "Sleep 76 · Readiness 55" in result.text
 
 
 def test_run_lock_and_update_idempotency(tmp_path, monkeypatch, mock_now_nyc):

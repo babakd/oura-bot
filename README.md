@@ -199,16 +199,21 @@ curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
 
 The default deployment runs at **10:00 AM in `America/New_York`**. Modal applies
 that named timezone to the cron, so the schedule follows daylight-saving time.
-The Telegram message is intentionally compact and contains:
+The Telegram message is compact but adapts to how much trustworthy context is
+available. A complete morning usually contains:
 
-- one observation chosen from validated Oura signals;
+- one clear conclusion with a short interpretation;
+- a deterministic snapshot of core sleep and recovery metrics;
 - one optional decision, or an explicit recommendation to keep the normal plan;
-- up to two deterministic evidence lines with personal-baseline context;
+- up to two primary comparisons with personal-baseline context;
+- one recent-context line when at least three observations support it;
+- an optional recheck on caution or data-quality days;
 - confidence plus data-freshness or partial-data status; and
 - inline buttons for accuracy, usefulness, adherence, skipping, or “not for me.”
 
 If required Oura data is unavailable, the agent sends a low-confidence
-data-quality card instead of inventing a recovery conclusion.
+data-quality card instead of inventing a recovery conclusion. Missing-data
+cards stay shorter; complete cards remain within one Telegram message.
 
 ### Logging Interventions
 

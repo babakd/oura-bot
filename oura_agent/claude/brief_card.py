@@ -12,7 +12,7 @@ from oura_agent.claude.models import create_message_with_fallback, response_text
 from oura_agent.config import CLAUDE_MODEL, logger
 from oura_agent.insights import (
     CANONICAL_ACTION_DOMAINS,
-    METRICS,
+    DECISION_METRIC_KEYS,
     default_card_from_packet,
     normalize_card,
     render_daily_card,
@@ -25,7 +25,7 @@ CARD_SCHEMA = {
     "type": "object",
     "properties": {
         "headline": {"type": "string", "maxLength": 72},
-        "observation": {"type": "string", "maxLength": 260},
+        "observation": {"type": "string", "maxLength": 360},
         "decision": {"type": "string", "maxLength": 190},
         "action_domain": {
             "type": "string",
@@ -35,7 +35,7 @@ CARD_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "string",
-                "enum": sorted(METRICS),
+                "enum": DECISION_METRIC_KEYS,
             },
             "maxItems": 2,
         },
@@ -92,7 +92,7 @@ def _remove_ungrounded_numbers(card: dict, packet: dict) -> dict:
 
 
 def generate_daily_card(api_key: str, packet: dict) -> GeneratedDailyCard:
-    """Select one grounded insight and render it as a compact daily card."""
+    """Select one grounded insight and render an adaptive morning brief."""
     if (
         packet.get("state") in {
             "data_unavailable",
@@ -124,7 +124,8 @@ def generate_daily_card(api_key: str, packet: dict) -> GeneratedDailyCard:
             {
                 "role": "user",
                 "content": (
-                    "Select today's one useful card from this deterministic packet. "
+                    "Select today's primary conclusion and enough useful context "
+                    "for an adaptive morning brief from this deterministic packet. "
                     "When no_action is true, action_domain must be no_action. "
                     "Otherwise action_domain must exactly match the domain of the "
                     "first evidence key. "
