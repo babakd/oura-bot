@@ -43,6 +43,26 @@ def test_check_webhook_reachability_detects_secret_rejection(monkeypatch):
     assert "secret" in message.lower()
 
 
+def test_check_webhook_reachability_accepts_expected_unauthenticated_401(
+    monkeypatch,
+):
+    def fake_post(*args, **kwargs):
+        response = MagicMock()
+        response.status_code = 401
+        response.text = '{"ok": false, "error": "unauthorized"}'
+        return response
+
+    monkeypatch.setattr(doctor.requests, "post", fake_post)
+
+    reachable, message = doctor.check_webhook_reachability(
+        "https://example.modal.run",
+        None,
+    )
+
+    assert reachable is True
+    assert "requires authentication" in message.lower()
+
+
 def test_sanitize_diagnostic_redacts_all_known_secrets_and_bot_urls(monkeypatch):
     secrets = {
         "TELEGRAM_BOT_TOKEN": "123456789:telegram-secret",

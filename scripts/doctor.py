@@ -129,6 +129,12 @@ def check_webhook_reachability(url: str, secret: str | None) -> tuple[bool, str]
     if "spend limit" in body.lower() or "resource exhausted" in body.lower():
         return False, "Modal reports resource exhaustion or billing spend limit"
     if response.status_code == 401:
+        if not secret:
+            return (
+                True,
+                "Webhook is reachable and requires authentication "
+                "(local secret unavailable for an authenticated probe)",
+            )
         return False, "Webhook reached Modal but rejected the supplied/missing secret"
     if response.status_code >= 500:
         return False, f"Webhook reached Modal but returned HTTP {response.status_code}: {body}"
