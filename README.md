@@ -2,20 +2,31 @@
 
 A personal health optimization agent that analyzes your Oura Ring data and sends you actionable daily recommendations via Telegram.
 
+> **Scope:** This repository is a private, single-user personal tool. It is not
+> designed for multi-user processing, distribution, commercialization, or
+> medical diagnosis or treatment. Revisit the security, consent, and Oura API
+> architecture before expanding that scope.
+
 ## Features
 
-- **Daily morning briefs** with sleep analysis and recommendations
-- **Personal baselines** - compares your metrics against your 60-day rolling averages
-- **Natural language logging** - "took magnesium", "20 min sauna", or send photos
-- **Intelligent chat agent** - ask anything about your health data with full historical context
-- **Intervention tracking** - correlates supplements/activities with sleep outcomes
-- **Claude Opus 4.7** with adaptive extended thinking + prompt caching for fast, context-aware analysis
+- **One daily action card** — a compact, evidence-grounded decision or an explicit
+  “follow your normal plan” when the data does not justify a change
+- **Deterministic health signals** — computes baseline comparisons, trends,
+  provenance, freshness, and data-quality state before Claude selects wording
+- **Personal baselines** — compares metrics against correction-safe 60-day rolling averages
+- **Natural language logging** — “took magnesium”, “20 min sauna”, or send photos
+- **Recoverable intervention clearing** — `/clear` requires confirmation and `/undo`
+  can restore the most recent clear
+- **Recommendation feedback** — Telegram buttons capture accuracy, usefulness,
+  adherence, skips, and rejected recommendation domains for future context
+- **Intelligent chat agent** — ask questions about your health data with historical context
+- **Configurable Anthropic Claude model** with Opus 4.8 as the privacy-conscious default
 - **Streaming chat** — responses stream into a single Telegram message that edits as Claude thinks
-- **Server-side code execution** for the morning brief — Claude computes real z-scores and correlations, not estimates
 
-###  Agent Capabilities
+### Agent Capabilities
 
-The chat agent uses Claude's tool use to dynamically query your health data: Ask questions like:
+The chat agent uses Claude's tool use to dynamically query your health data. Ask questions like:
+
 - "How has my sleep changed since April?"
 - "Compare my HRV this month vs 6 months ago"
 - "What was my average readiness last summer?"
@@ -25,37 +36,62 @@ The chat agent uses Claude's tool use to dynamically query your health data: Ask
 
 | Component | Technology |
 |-----------|------------|
-| AI Model | Claude Opus 4.7 with adaptive extended thinking + prompt caching |
+| AI Model | Anthropic Claude via `ANTHROPIC_MODEL` (Opus 4.8 by default) |
 | Hosting | Modal (serverless) |
 | Data Source | Oura Ring API |
 | Notifications | Telegram Bot |
-| Storage | Modal Volume (encrypted) |
+| Health-data storage | Modal Volume (`oura-health-data`) |
+| Coordination | Modal Dict (`oura-agent-coordination`) for locks, delivery state, and Telegram update claims |
 
 ## Project Structure
 
 ```
 oura-agent/
-├── modal_agent.py          # Modal entrypoint with decorators
-├── oura_agent/             # Python package
-│   ├── api/                # Oura API client
-│   ├── extraction/         # Metrics extraction
-│   ├── storage/            # Baselines, interventions, conversations
-│   ├── telegram/           # Telegram client
-│   └── claude/             # Claude AI handlers + agent with tools
-├── prompts/                # System prompts
-│   ├── morning_brief.md    # Morning brief generation
-│   └── agent.md            # Chat/intervention agent with tools
-├── scripts/                # Utilities
-│   └── setup.py            # Interactive setup wizard
-└── tests/                  # Test suite (190 tests)
+├── modal_agent.py                    # Scheduled job, webhook, and Modal resources
+├── oura_agent/
+│   ├── api/oura.py                   # Typed Oura client and endpoint date handling
+│   ├── extraction/metrics.py         # Oura response normalization
+│   ├── insights.py                   # Deterministic daily insight packet and renderer
+│   ├── claude/
+│   │   ├── brief_card.py             # Structured daily-card selection + safe fallback
+│   │   ├── models.py                 # Model selection and Fable-to-Opus fallback
+│   │   └── agent.py                  # Tool-using conversational agent
+│   ├── storage/
+│   │   ├── baselines.py              # Atomic, correction-safe rolling baselines
+│   │   ├── interventions.py          # Immutable events + recoverable clear/undo
+│   │   ├── recommendations.py        # Cards, delivery, and feedback ledger
+│   │   ├── profile.py                # Shared user context
+│   │   └── runs.py                   # Run and Telegram idempotency records
+│   └── telegram/client.py            # Splitting, retries, edits, and callbacks
+├── prompts/
+│   ├── daily_card.md                 # Current scheduled-card selection contract
+│   ├── morning_brief.md              # Tool-based brief helper prompt
+│   └── agent.md                      # Chat and intervention prompt
+├── scripts/
+│   ├── setup.py                      # Interactive setup wizard
+│   └── doctor.py                     # Non-destructive configuration checks
+└── tests/                            # Unit, integration, reliability, and E2E tests
 ```
 
 ## Prerequisites
 
-1. **Oura Ring** with active membership (API access required)
+1. **Oura Ring** with active membership and an existing Oura API credential
 2. **Anthropic API key** from [console.anthropic.com](https://console.anthropic.com)
 3. **Telegram Bot** (setup instructions below)
 4. **Modal account** (free tier works) from [modal.com](https://modal.com)
+
+Oura has deprecated personal access tokens and recommends OAuth2 plus webhooks.
+This repository still accepts an existing
+`OURA_ACCESS_TOKEN` for backward compatibility, but its OAuth migration is not
+yet implemented. Keep a working existing token until that migration is
+complete; new users without one do not yet have a supported authentication
+path through the setup wizard.
+
+The default model is `claude-opus-4-8`. Fable 5 is opt-in only: it requires
+accepting mandatory 30-day provider retention and can refuse health or biology
+requests under its eligibility policy. Verify both your workspace and workload
+eligibility before setting `ANTHROPIC_MODEL=claude-fable-5`. The shared model
+helper retries Fable access errors and refusals on Opus 4.8.
 
 ## Quick Start
 
@@ -64,18 +100,18 @@ oura-agent/
 ```bash
 git clone https://github.com/babakd/oura-bot.git
 cd oura-bot
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 ### 2. Run Setup Wizard
 
 ```bash
-python scripts/setup.py
+python3 scripts/setup.py
 ```
 
 The wizard will guide you through:
 - Getting your Anthropic API key
-- Getting your Oura access token
+- Validating an existing Oura access token
 - Creating your Telegram bot
 - Auto-detecting your Telegram chat ID
 - Generating a secure webhook secret
@@ -101,18 +137,18 @@ If you prefer manual setup instead of the wizard:
    ```
    Look for `"chat":{"id":123456789}` in the response
 
-#### Get Oura API Token
+#### Configure Oura API Access
 
-1. Go to [cloud.ouraring.com](https://cloud.ouraring.com)
-2. Navigate to **Personal Access Tokens**
-3. Create a new token with all scopes
-4. Copy the token
+The application currently reads `OURA_ACCESS_TOKEN`. Existing installations
+can continue using a working token. Oura no longer offers new personal access
+tokens; OAuth2 support is tracked as required migration work and is not yet
+implemented here.
 
 #### Setup Modal
 
 ```bash
 # Install Modal CLI
-pip install modal
+python3 -m pip install modal
 
 # Authenticate with Modal
 modal setup
@@ -128,13 +164,17 @@ modal secret create telegram \
     TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32)
 ```
 
+The deployed app uses Opus 4.8 when `ANTHROPIC_MODEL` is absent. To opt into
+another model, add `ANTHROPIC_MODEL=<model-id>` to the `anthropic` Modal secret
+as well as any local `.env`; review the Fable warning above before selecting it.
+
 #### Deploy
 
 ```bash
 # Deploy to Modal (starts the daily cron automatically)
 modal deploy modal_agent.py
 
-# Test it immediately
+# Optional live run: writes health artifacts and sends a Telegram card
 modal run modal_agent.py
 ```
 
@@ -155,14 +195,20 @@ curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
 
 ## Usage
 
-### Daily Briefs
+### Daily Action Card
 
-The agent runs automatically at 10 AM EST every day. You'll receive a Telegram message with:
-- Sleep score, HRV, deep sleep, readiness compared to your baselines
-- Workout intensity recommendation (1-10)
-- Cognitive load recommendation (High/Medium/Low)
-- Multi-day trends and pattern insights
-- Alerts for concerning deviations
+The default deployment runs at **10:00 AM in `America/New_York`**. Modal applies
+that named timezone to the cron, so the schedule follows daylight-saving time.
+The Telegram message is intentionally compact and contains:
+
+- one observation chosen from validated Oura signals;
+- one optional decision, or an explicit recommendation to keep the normal plan;
+- up to two deterministic evidence lines with personal-baseline context;
+- confidence plus data-freshness or partial-data status; and
+- inline buttons for accuracy, usefulness, adherence, skipping, or “not for me.”
+
+If required Oura data is unavailable, the agent sends a low-confidence
+data-quality card instead of inventing a recovery conclusion.
 
 ### Logging Interventions
 
@@ -203,69 +249,105 @@ The agent will show a brief progress message ("📊 Analyzing the month...") whi
 ### Bot Commands
 
 ```
-/status      - Show today's logged interventions
-/brief       - Show the latest morning brief
-/regen-brief - Regenerate today's brief (useful if Oura data was delayed)
-/clear       - Clear today's interventions
-/help        - Show available commands
+/status        - Show today's logged interventions
+/brief         - Show the latest daily action card
+/regen-brief   - Generate and send a fresh card (useful after a delayed Oura sync)
+/profile       - Show personal context shared by daily cards and chat
+/clear         - Ask for confirmation before hiding today's interventions
+/clear confirm - Confirm the recoverable clear
+/undo          - Restore the most recent intervention clear
+/help          - Show available commands
 ```
 
-### CLI Commands
+### Live CLI Commands
+
+These commands target the configured Modal app. A manual run sends a live
+Telegram card, and a backfill writes health data and updates baselines. Use
+local pytest tests for validation.
 
 ```bash
-# Run morning brief manually
+# Generate and send a live daily action card
 modal run modal_agent.py
 
-# Backfill historical data (all data saved for long-term queries)
+# Backfill historical data into the live volume
 modal run modal_agent.py::backfill_history --days 280
 
-# Reset baselines to defaults
-modal run modal_agent.py::reset_baselines
-
-# View recent history
+# Read recent stored history
 modal run modal_agent.py::view_history --days 7
 
 # Check logs
 modal app logs oura-agent
 ```
 
+Destructive baseline-reset, intervention-delete, and volume-delete operations
+are intentionally omitted. Do not use them as routine troubleshooting against
+production data; prepare and verify a recoverable backup and a maintenance plan
+before any destructive operation.
+
 ## Data Retention
 
 | Data Type | Retention | Purpose |
 |-----------|-----------|---------|
 | Daily metrics | **Unlimited** | Long-term trend analysis |
-| Morning briefs | **Unlimited** | Historical reference |
+| Daily action cards | **Unlimited** | Historical decisions and evidence |
 | Interventions | **Unlimited** | Correlation analysis |
+| Recommendation, feedback, and run events | **Unlimited** | Learning context and operational audit |
 | Conversations | 365 days | Chat context |
 | Baselines | 60-day rolling | Personal averages |
 | Raw Oura API responses | 28 days | Redundant with metrics |
 
-**Note:** The morning brief uses the most recent 28 days of data for daily recommendations, but the chat agent can query your entire history for long-term analysis.
+**Note:** The daily action card uses the most recent 28 days of data for its
+decision packet, while the chat agent can query the retained metric history.
 
-## Cost Estimate
+## Cost
 
-- **Modal**: Free tier includes 30 compute-hours/month (agent uses ~3 hours/month)
-- **Anthropic API**:
-  - Morning briefs: ~$0.10-0.20/day
-  - Chat queries: ~$0.02-0.10 per message (varies by complexity)
-  - Extended thinking adds ~2-3x tokens but improves quality significantly
-- **Total**: ~$5-15/month depending on chat usage
+Cost depends on current Modal and Anthropic pricing, selected model, chat usage,
+backfills, and retry volume. Use the providers' billing dashboards and current
+pricing pages rather than relying on a fixed estimate in this repository.
 
 ## Data Privacy
 
-- All health data is stored on Modal's encrypted volumes
-- Data never leaves Modal's infrastructure except to Telegram
-- No third-party analytics or tracking
-- Delete all data anytime: `modal volume delete oura-health-data`
+This application processes sensitive health and behavioral data. Its actual
+data flow is:
+
+1. Oura biometric data is fetched from the Oura API into Modal.
+2. Raw responses, extracted metrics, baselines, interventions, rendered
+   daily-card artifacts, profile data, recommendation/feedback events, run
+   records, and conversation history are stored on the `oura-health-data`
+   Modal volume according to the retention table above.
+3. Relevant metrics, history, interventions, profile details, conversation
+   context, and submitted photos are sent to Anthropic when generating cards,
+   answering questions, or interpreting an image. Anthropic's account and model
+   retention terms therefore apply. When the active model is configured as
+   `claude-fable-5`, its mandatory 30-day provider retention applies; that
+   Fable-specific retention statement applies only while Fable is enabled.
+4. The `oura-agent-coordination` Modal Dict stores small coordination records
+   such as opaque card/update IDs, timestamps, lock ownership, and delivery
+   state. Health metrics and prompt context remain in the Volume, not the Dict.
+5. Generated cards, chat replies, operational notices, and user-submitted
+   Telegram messages or photos pass through Telegram and are subject to
+   Telegram's storage and retention behavior.
+6. Modal runtime logs and local operational output contain status and error
+   information and may include metric values. Treat those logs as health data.
+7. Local setup stores credentials in `.env`; optional local backfills store
+   health data under `data/`. Both paths are gitignored, but they remain the
+   operator's responsibility to protect and back up.
+
+There is no third-party analytics integration in this repository. Revoking an
+Oura, Anthropic, or Telegram credential stops future access but does not erase
+copies already retained by another provider. Deleting the Modal volume is
+irreversible and does not delete messages from Telegram or data retained under
+another provider's policy; destructive volume commands are intentionally not
+documented here.
 
 ## Development
 
 ```bash
 # Install dev dependencies
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 
 # Run tests
-pytest tests/ -v
+python3 -m pytest tests/ -v
 
 # Deploy
 modal deploy modal_agent.py
@@ -276,15 +358,18 @@ modal deploy modal_agent.py
 Run the non-destructive doctor first:
 
 ```bash
-python scripts/doctor.py
+python3 scripts/doctor.py
 ```
 
 The doctor checks local credentials, Telegram webhook registration, and Modal
 HTTP reachability. It does not send Telegram messages, call `/clear`, or touch
-the Modal volume.
+the Modal volume. Run it with the same Python interpreter where the project
+requirements were installed. If it reports that `requests` is missing, follow
+the interpreter-specific install command it prints.
 
 ### "No data returned from Oura"
-Oura data syncs when you open the app. Make sure to open the Oura app before the morning brief runs.
+Oura data syncs when you open the app. Make sure to open the Oura app before the
+daily action card runs.
 
 ### "Telegram message not received"
 1. Verify your bot token: `curl https://api.telegram.org/bot<TOKEN>/getMe`
@@ -299,7 +384,7 @@ Oura data syncs when you open the app. Make sure to open the Oura app before the
 2. Check that `secret_token` matches `TELEGRAM_WEBHOOK_SECRET` in Modal secrets
 3. Check Modal reachability:
    ```bash
-   python scripts/doctor.py
+   python3 scripts/doctor.py
    ```
 4. If Modal reports `workspace ... disabled`, `Resource exhausted`, or `billing cycle spend limit reached`, raise the Modal workspace spend limit or wait for the next billing cycle. Telegram cannot reach the webhook until Modal HTTP is re-enabled.
 5. Check Modal logs for 401 errors

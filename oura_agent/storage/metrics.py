@@ -6,6 +6,27 @@ import json
 from datetime import timedelta
 
 from oura_agent.config import METRICS_DIR, BRIEFS_DIR
+from oura_agent.utils import atomic_write_json
+
+
+SLEEP_SUMMARY_FIELDS = {
+    "sleep_score",
+    "deep_sleep_minutes",
+    "light_sleep_minutes",
+    "rem_sleep_minutes",
+    "total_sleep_minutes",
+    "sleep_efficiency",
+    "hrv",
+    "avg_hr",
+    "avg_breath",
+    "latency_minutes",
+    "restless_periods",
+    "resting_hr",
+    "readiness",
+    "temperature_deviation",
+    "sleep_recorded",
+    "sleep_note",
+}
 
 
 def _ensure_metrics_dir():
@@ -31,25 +52,38 @@ def load_historical_metrics(days: int = None) -> list:
     if days is None:
         # Load all available metrics files
         metrics_history = []
-        for metrics_file in sorted(METRICS_DIR.glob("*.json"), reverse=True):
+        for metrics_file in sorted(METRICS_DIR.glob("*.json")):
             try:
                 with open(metrics_file) as f:
                     data = json.load(f)
                     date = metrics_file.stem  # YYYY-MM-DD from filename
-                    metrics_history.append({"date": date, **data})
+                    # Older local backfills used "metrics"; normalize those
+                    # records at the read boundary so tools see one schema.
+                    if "summary" not in data and isinstance(data.get("metrics"), dict):
+                        data["summary"] = data["metrics"]
+                    record = dict(data)
+                    record["date"] = date
+                    metrics_history.append(record)
             except (json.JSONDecodeError, IOError):
                 continue
         return metrics_history
 
-    # Load specific number of days
+    # Load a specific calendar window in ascending chronological order.
     metrics_history = []
-    for i in range(days):
+    for i in reversed(range(days)):
         date = (now_nyc() - timedelta(days=i)).strftime("%Y-%m-%d")
         metrics_file = METRICS_DIR / f"{date}.json"
         if metrics_file.exists():
-            with open(metrics_file) as f:
-                data = json.load(f)
-                metrics_history.append({"date": date, **data})
+            try:
+                with open(metrics_file) as f:
+                    data = json.load(f)
+                if "summary" not in data and isinstance(data.get("metrics"), dict):
+                    data["summary"] = data["metrics"]
+                record = dict(data)
+                record["date"] = date
+                metrics_history.append(record)
+            except (json.JSONDecodeError, IOError):
+                continue
     return metrics_history
 
 
@@ -82,6 +116,10 @@ def save_daily_metrics(
         except (json.JSONDecodeError, IOError):
             existing_data = {}
 
+    # Normalize the legacy local-backfill schema before merging.
+    if "summary" not in existing_data and isinstance(existing_data.get("metrics"), dict):
+        existing_data["summary"] = existing_data["metrics"]
+
     # Build new data, merging with existing if requested
     data = {"date": date}
 
@@ -89,6 +127,12 @@ def save_daily_metrics(
     if metrics is not None:
         if merge and "summary" in existing_data:
             merged_summary = existing_data.get("summary", {}).copy()
+            # A sleep fetch is a domain snapshot, not a sparse patch. Remove
+            # stale sleep fields before applying it so a no-sleep refresh
+            # cannot coexist with yesterday's detailed values.
+            if "sleep_recorded" in metrics:
+                for key in SLEEP_SUMMARY_FIELDS:
+                    merged_summary.pop(key, None)
             merged_summary.update(metrics)
             data["summary"] = merged_summary
         else:
@@ -101,6 +145,9 @@ def save_daily_metrics(
     # Handle detailed sleep
     if detailed_sleep is not None:
         data["detailed_sleep"] = detailed_sleep
+    elif metrics is not None and "sleep_recorded" in metrics:
+        # A successful no-sleep snapshot must clear stale detail.
+        data["detailed_sleep"] = {}
     elif "detailed_sleep" in existing_data:
         data["detailed_sleep"] = existing_data["detailed_sleep"]
     else:
@@ -114,8 +161,8 @@ def save_daily_metrics(
     else:
         data["detailed_workouts"] = []
 
-    with open(metrics_file, 'w') as f:
-        json.dump(data, f, indent=2)
+    # Replace atomically so a terminated container cannot leave truncated JSON.
+    atomic_write_json(metrics_file, data, indent=2)
 
 
 def load_recent_briefs(days: int = 3) -> list:

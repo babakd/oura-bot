@@ -48,13 +48,20 @@ RAW_DIR = DATA_DIR / "raw"
 METRICS_DIR = DATA_DIR / "metrics"
 INTERVENTIONS_DIR = DATA_DIR / "interventions"
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
+RECOMMENDATIONS_DIR = DATA_DIR / "recommendations"
+RUNS_DIR = DATA_DIR / "runs"
 BASELINES_FILE = DATA_DIR / "baselines.json"
+PROFILE_FILE = DATA_DIR / "profile.json"
 
 # API configuration
 OURA_API_BASE = "https://api.ouraring.com/v2/usercollection"
 
-# Claude model
-CLAUDE_MODEL = "claude-opus-4-7"
+# Claude models. Fable 5 can be enabled explicitly with ANTHROPIC_MODEL after
+# accepting its mandatory 30-day provider-retention requirement. Opus 4.8 is
+# the privacy-preserving default migration target and the refusal fallback.
+CLAUDE_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+CLAUDE_FALLBACK_MODEL = os.environ.get("ANTHROPIC_FALLBACK_MODEL", "claude-opus-4-8")
+CLAUDE_FABLE_MODEL = "claude-fable-5"
 
 # Data retention windows
 RAW_WINDOW_DAYS = 28  # Only used for raw API response pruning

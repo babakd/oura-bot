@@ -86,8 +86,16 @@ class TestExecuteTool:
             "data_points": 14,
             "last_updated": "2026-01-15T10:00:00",
             "metrics": {
-                "sleep_score": {"mean": 75.0, "std": 8.0, "values": [70, 75, 80]},
-                "hrv": {"mean": 48.0, "std": 6.0, "values": [45, 48, 51]}
+                "sleep_score": {
+                    "mean": 75.0,
+                    "std": 8.0,
+                    "values": [70, 75, 80, 72, 78, 74, 76],
+                },
+                "hrv": {
+                    "mean": 48.0,
+                    "std": 6.0,
+                    "values": [45, 48, 51, 46, 49, 47, 50],
+                },
             }
         }
         with open(temp_data_dir / "baselines.json", "w") as f:

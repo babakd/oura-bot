@@ -93,19 +93,30 @@ class TestWebhookCommandRouting:
 
         assert result == "No briefs available yet."
 
-    def test_clear_command_removes_file(self, temp_data_dir, mock_now_nyc):
-        """Test /clear command removes today's interventions."""
+    def test_clear_command_soft_clears_with_recoverable_snapshot(
+        self,
+        temp_data_dir,
+        mock_now_nyc,
+    ):
+        """Test clear hides today's interventions without deleting events."""
         # Create intervention
         modal_agent.save_intervention_raw("test intervention")
 
-        interventions_file = temp_data_dir / "interventions" / "2026-01-15.jsonl"
-        assert interventions_file.exists()
+        event_files = list(
+            (
+                temp_data_dir
+                / "interventions"
+                / ".events"
+                / "2026-01-15"
+            ).glob("*.json")
+        )
+        assert len(event_files) == 1
 
-        # Clear it
-        if interventions_file.exists():
-            interventions_file.unlink()
+        result = modal_agent.soft_clear_interventions("2026-01-15")
 
-        assert not interventions_file.exists()
+        assert result["status"] == "cleared"
+        assert modal_agent.load_interventions("2026-01-15")["entries"] == []
+        assert event_files[0].exists()
 
     def test_natural_language_saves_raw(self, temp_data_dir, mock_now_nyc):
         """Test natural language messages are saved as raw text."""
@@ -478,5 +489,4 @@ class TestRegenBriefCommand:
 
         assert "/regen-brief" in message
         assert "sync your Oura ring" in message
-
 

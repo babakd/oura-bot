@@ -7,6 +7,8 @@ import base64
 
 from oura_agent.config import CLAUDE_MODEL, logger
 from oura_agent.claude.agent import run_brief_agent
+from oura_agent.claude.brief_card import generate_daily_card
+from oura_agent.claude.models import create_message_with_fallback, response_text
 from oura_agent.telegram.client import _detect_image_mime_type
 
 
@@ -45,12 +47,16 @@ Output only the cleaned text, nothing else."""
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        call = create_message_with_fallback(
+            client,
+            {
+                "max_tokens": 50,
+                "messages": [{"role": "user", "content": prompt}],
+            },
             model=CLAUDE_MODEL,
-            max_tokens=50,
-            messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text.strip().strip('"')
+        cleaned = response_text(call.response)
+        return cleaned.strip().strip('"') if cleaned else raw_text
     except Exception as e:
         logger.error(f"Error cleaning intervention: {e}")
         return raw_text
@@ -82,22 +88,25 @@ Examples: "Creatine 2 capsules, Neuro-Mag 1 capsule", "Post-workout protein shak
 """
 
     client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
+    call = create_message_with_fallback(
+        client,
+        {
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": image_base64,
+                        }
+                    },
+                    {"type": "text", "text": prompt}
+                ]
+            }],
+        },
         model=CLAUDE_MODEL,
-        max_tokens=100,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": image_base64,
-                    }
-                },
-                {"type": "text", "text": prompt}
-            ]
-        }]
     )
-    return response.content[0].text.strip()
+    return response_text(call.response).strip() or "NOT_AN_INTERVENTION"

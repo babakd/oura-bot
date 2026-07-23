@@ -14,6 +14,7 @@ touches the Modal volume.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,13 +22,26 @@ from typing import Any
 try:
     import requests
 except ImportError:
-    print("ERROR: requests is required. Install dependencies with: pip install -r requirements.txt")
+    print(
+        "ERROR: requests is required for this interpreter. Install dependencies with:\n"
+        f'  "{sys.executable}" -m pip install -r requirements.txt'
+    )
     sys.exit(2)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 TELEGRAM_API_BASE = "https://api.telegram.org"
+SENSITIVE_ENV_KEYS = (
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_WEBHOOK_SECRET",
+    "ANTHROPIC_API_KEY",
+    "OURA_ACCESS_TOKEN",
+)
+TELEGRAM_BOT_URL_RE = re.compile(
+    r"(https?://api\.telegram\.org/(?:file/)?bot)[^/\s\"']+",
+    flags=re.IGNORECASE,
+)
 
 
 def load_local_env() -> None:
@@ -52,6 +66,21 @@ def warn(message: str) -> None:
 
 def fail(message: str) -> None:
     print(f"FAIL: {message}")
+
+
+def sanitize_diagnostic(value: object) -> str:
+    """Remove known credentials and Telegram bot tokens from diagnostic text."""
+    text = str(value)
+    for key in SENSITIVE_ENV_KEYS:
+        secret = os.environ.get(key)
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    return TELEGRAM_BOT_URL_RE.sub(r"\1<redacted>", text)
+
+
+def exception_label(exc: BaseException) -> str:
+    """Return useful exception context without including its potentially secret text."""
+    return type(exc).__name__
 
 
 def redact_modal_url(url: str) -> str:
@@ -88,8 +117,12 @@ def check_webhook_reachability(url: str, secret: str | None) -> tuple[bool, str]
     if secret:
         headers["X-Telegram-Bot-Api-Secret-Token"] = secret
 
-    response = requests.post(url, json=dummy_update, headers=headers, timeout=30)
-    body = response.text[:500]
+    try:
+        response = requests.post(url, json=dummy_update, headers=headers, timeout=30)
+    except Exception as exc:
+        return False, f"Webhook request failed ({exception_label(exc)})"
+
+    body = sanitize_diagnostic(response.text[:500])
 
     if "workspace" in body.lower() and "disabled" in body.lower():
         return False, "Modal HTTP endpoint reports workspace disabled"
@@ -133,7 +166,7 @@ def main() -> int:
     try:
         info = get_webhook_info(os.environ["TELEGRAM_BOT_TOKEN"])
     except Exception as exc:
-        fail(f"Could not read Telegram webhook info: {exc}")
+        fail(f"Could not read Telegram webhook info ({exception_label(exc)})")
         return 1
 
     url = info.get("url", "")
@@ -149,7 +182,7 @@ def main() -> int:
         ok("Telegram pending_update_count is 0")
 
     if info.get("last_error_message"):
-        warn(f"Telegram last error: {info.get('last_error_message')}")
+        warn(f"Telegram last error: {sanitize_diagnostic(info.get('last_error_message'))}")
     if info.get("last_error_date"):
         warn(f"Telegram last_error_date: {info.get('last_error_date')}")
 

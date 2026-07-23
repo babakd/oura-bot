@@ -2,7 +2,7 @@
 Tier 1 tests: prompt caching, model bump, widened conversation window.
 
 These tests verify the new architecture behavior:
-- CLAUDE_MODEL is Opus 4.7
+- CLAUDE_MODEL is Opus 4.8
 - generate_brief_with_claude uses cached system prompt
 - handle_message_with_agent uses cached system prompt + tools, with current date
   passed in a separate (uncached) system block
@@ -23,9 +23,9 @@ from oura_agent.storage import conversations
 
 
 class TestModelBump:
-    def test_model_is_opus_4_7(self):
-        assert config.CLAUDE_MODEL == "claude-opus-4-7"
-        assert modal_agent.CLAUDE_MODEL == "claude-opus-4-7"
+    def test_model_is_opus_4_8(self):
+        assert config.CLAUDE_MODEL == "claude-opus-4-8"
+        assert modal_agent.CLAUDE_MODEL == "claude-opus-4-8"
 
 
 class TestBriefPromptCaching:
@@ -57,7 +57,7 @@ class TestBriefPromptCaching:
         assert first.get("cache_control", {}).get("type") == "ephemeral"
         assert first["text"], "cached block must contain the system prompt"
 
-    def test_brief_uses_opus_4_7(self, monkeypatch):
+    def test_brief_uses_opus_4_8(self, monkeypatch):
         mock_client = self._make_mock_client(monkeypatch)
         handlers.generate_brief_with_agent(
             "fake-key", "2026-01-15",
@@ -66,7 +66,7 @@ class TestBriefPromptCaching:
             [],
         )
         call = mock_client.messages.create.call_args
-        assert call.kwargs["model"] == "claude-opus-4-7"
+        assert call.kwargs["model"] == "claude-opus-4-8"
 
 
 class TestAgentPromptCaching:
@@ -114,11 +114,11 @@ class TestAgentPromptCaching:
         assert "tools" in call.kwargs
         assert len(call.kwargs["tools"]) > 0
 
-    def test_agent_uses_opus_4_7(self, temp_data_dir, mock_now_nyc, monkeypatch):
+    def test_agent_uses_opus_4_8(self, temp_data_dir, mock_now_nyc, monkeypatch):
         mock_client = self._make_tool_then_final(monkeypatch)
         agent.handle_message_with_agent("fake-key", "hello")
         call = mock_client.messages.create.call_args_list[0]
-        assert call.kwargs["model"] == "claude-opus-4-7"
+        assert call.kwargs["model"] == "claude-opus-4-8"
 
 
 class TestConversationWindowWidening:

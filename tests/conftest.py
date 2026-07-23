@@ -18,9 +18,35 @@ def temp_data_dir(tmp_path, monkeypatch):
     """Redirect all data paths to temp directory."""
     import modal_agent
     from oura_agent import config
-    from oura_agent.storage import baselines, interventions, metrics, conversations
+    from oura_agent.storage import (
+        baselines,
+        conversations,
+        interventions,
+        metrics,
+        profile,
+        recommendations,
+        runs,
+    )
     from oura_agent import utils
     from oura_agent.claude import agent
+
+    class FakeCoordination:
+        """In-memory stand-in for Modal Dict's atomic put-if-absent API."""
+
+        def __init__(self):
+            self.values = {}
+
+        def put(self, key, value, *, skip_if_exists=False):
+            if skip_if_exists and key in self.values:
+                return False
+            self.values[key] = value
+            return True
+
+        def get(self, key, default=None):
+            return self.values.get(key, default)
+
+        def pop(self, key, default=None):
+            return self.values.pop(key, default)
 
     # Patch all modules that reference these paths
     modules_to_patch = [modal_agent, config]
@@ -31,7 +57,10 @@ def temp_data_dir(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "METRICS_DIR", tmp_path / "metrics")
         monkeypatch.setattr(module, "INTERVENTIONS_DIR", tmp_path / "interventions")
         monkeypatch.setattr(module, "CONVERSATIONS_DIR", tmp_path / "conversations")
+        monkeypatch.setattr(module, "RECOMMENDATIONS_DIR", tmp_path / "recommendations")
+        monkeypatch.setattr(module, "RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(module, "BASELINES_FILE", tmp_path / "baselines.json")
+        monkeypatch.setattr(module, "PROFILE_FILE", tmp_path / "profile.json")
 
     # Also patch the storage modules directly
     monkeypatch.setattr(baselines, "BASELINES_FILE", tmp_path / "baselines.json")
@@ -39,11 +68,28 @@ def temp_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(metrics, "METRICS_DIR", tmp_path / "metrics")
     monkeypatch.setattr(metrics, "BRIEFS_DIR", tmp_path / "briefs")
     monkeypatch.setattr(conversations, "CONVERSATIONS_DIR", tmp_path / "conversations")
+    monkeypatch.setattr(profile, "PROFILE_FILE", tmp_path / "profile.json")
+    monkeypatch.setattr(recommendations, "RECOMMENDATIONS_DIR", tmp_path / "recommendations")
+    monkeypatch.setattr(
+        recommendations,
+        "LEDGER_FILE",
+        tmp_path / "recommendations" / "ledger.jsonl",
+    )
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(runs, "UPDATES_FILE", tmp_path / "runs" / "telegram_updates.jsonl")
+    monkeypatch.setattr(runs, "RUN_LEDGER_FILE", tmp_path / "runs" / "runs.jsonl")
     monkeypatch.setattr(utils, "BRIEFS_DIR", tmp_path / "briefs")
     monkeypatch.setattr(utils, "RAW_DIR", tmp_path / "raw")
     monkeypatch.setattr(utils, "METRICS_DIR", tmp_path / "metrics")
     monkeypatch.setattr(utils, "INTERVENTIONS_DIR", tmp_path / "interventions")
     monkeypatch.setattr(utils, "CONVERSATIONS_DIR", tmp_path / "conversations")
+    monkeypatch.setattr(utils, "RECOMMENDATIONS_DIR", tmp_path / "recommendations")
+    monkeypatch.setattr(utils, "RUNS_DIR", tmp_path / "runs")
+    # Local Modal Function execution has no mounted remote volume. Keep every
+    # E2E test inside pytest's temporary directory instead of attempting a
+    # network reload of the production volume.
+    monkeypatch.setattr(modal_agent, "_reload_volume", lambda: None)
+    monkeypatch.setattr(modal_agent, "coordination", FakeCoordination())
 
     # Note: agent module no longer uses RAW_WINDOW_DAYS - it loads all available data
     # and filters by date range in tool execution
@@ -54,6 +100,8 @@ def temp_data_dir(tmp_path, monkeypatch):
     (tmp_path / "metrics").mkdir()
     (tmp_path / "interventions").mkdir()
     (tmp_path / "conversations").mkdir()
+    (tmp_path / "recommendations").mkdir()
+    (tmp_path / "runs").mkdir()
 
     return tmp_path
 
@@ -64,12 +112,15 @@ def mock_now_nyc(monkeypatch):
     import modal_agent
     from oura_agent import utils
     from oura_agent.claude import agent
+    from oura_agent.storage import recommendations, runs
     from zoneinfo import ZoneInfo
 
     fixed_time = datetime(2026, 1, 15, 10, 30, 0, tzinfo=ZoneInfo("America/New_York"))
     monkeypatch.setattr(modal_agent, "now_nyc", lambda: fixed_time)
     monkeypatch.setattr(utils, "now_nyc", lambda: fixed_time)
     monkeypatch.setattr(agent, "now_nyc", lambda: fixed_time)
+    monkeypatch.setattr(recommendations, "now_nyc", lambda: fixed_time)
+    monkeypatch.setattr(runs, "now_nyc", lambda: fixed_time)
     return fixed_time
 
 

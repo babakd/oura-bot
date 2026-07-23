@@ -17,6 +17,49 @@ def _workout_duration_minutes(start_dt: str, end_dt: str) -> int:
         return 0
 
 
+def _endpoint_succeeded(oura_data: dict, endpoint: str, data_key: str) -> bool:
+    """Return whether an endpoint's collection represents a successful fetch.
+
+    Older fixtures and persisted payloads do not carry ``_fetch_status``.  In
+    that case, presence of the data key means the collection was successfully
+    fetched.  New payloads can explicitly distinguish a real empty collection
+    from an empty fallback caused by a request failure.
+    """
+    if data_key not in oura_data:
+        return False
+    status = oura_data.get("_fetch_status", {}).get(endpoint)
+    return status is None or status.get("ok") is True
+
+
+def _duration_minutes_or_none(seconds):
+    """Convert a duration in seconds while preserving valid zero values."""
+    if seconds is None:
+        return None
+    return round(seconds / 60)
+
+
+def _add_workout_metrics(metrics: dict, oura_data: dict) -> None:
+    """Aggregate workouts, including explicit zeros for a successful rest day."""
+    if not _endpoint_succeeded(oura_data, "workout", "workouts"):
+        return
+
+    workouts = oura_data.get("workouts") or []
+    metrics["workout_count"] = len(workouts)
+    metrics["workout_calories"] = sum(
+        w.get("calories", 0) or 0 for w in workouts
+    )
+    metrics["workout_minutes"] = sum(
+        _workout_duration_minutes(
+            w.get("start_datetime"),
+            w.get("end_datetime"),
+        )
+        for w in workouts
+    )
+    metrics["workout_activities"] = [
+        w.get("activity") for w in workouts if w.get("activity")
+    ]
+
+
 def extract_metrics(oura_data: dict) -> dict:
     """Extract summary metrics from Oura API response (for daily tracking)."""
     metrics = {}
@@ -29,20 +72,25 @@ def extract_metrics(oura_data: dict) -> dict:
     # Detailed sleep (for deep sleep, efficiency, HRV)
     if oura_data.get("sleep"):
         sleep_detail = oura_data["sleep"][0]
-        deep_sleep_sec = sleep_detail.get("deep_sleep_duration", 0)
-        light_sleep_sec = sleep_detail.get("light_sleep_duration", 0)
-        rem_sleep_sec = sleep_detail.get("rem_sleep_duration", 0)
-        total_sleep_sec = sleep_detail.get("total_sleep_duration", 0)
-
-        metrics["deep_sleep_minutes"] = deep_sleep_sec // 60 if deep_sleep_sec else None
-        metrics["light_sleep_minutes"] = light_sleep_sec // 60 if light_sleep_sec else None
-        metrics["rem_sleep_minutes"] = rem_sleep_sec // 60 if rem_sleep_sec else None
-        metrics["total_sleep_minutes"] = total_sleep_sec // 60 if total_sleep_sec else None
+        metrics["deep_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("deep_sleep_duration")
+        )
+        metrics["light_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("light_sleep_duration")
+        )
+        metrics["rem_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("rem_sleep_duration")
+        )
+        metrics["total_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("total_sleep_duration")
+        )
         metrics["sleep_efficiency"] = sleep_detail.get("efficiency")
         metrics["hrv"] = sleep_detail.get("average_hrv")
         metrics["avg_hr"] = sleep_detail.get("average_heart_rate")
         metrics["avg_breath"] = sleep_detail.get("average_breath")
-        metrics["latency_minutes"] = sleep_detail.get("latency", 0) // 60 if sleep_detail.get("latency") else None
+        metrics["latency_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("latency")
+        )
         metrics["restless_periods"] = sleep_detail.get("restless_periods")
         metrics["resting_hr"] = sleep_detail.get("lowest_heart_rate")
 
@@ -59,24 +107,19 @@ def extract_metrics(oura_data: dict) -> dict:
         metrics["steps"] = activity.get("steps")
 
     # Daily stress (API returns seconds, convert to minutes)
-    if oura_data.get("daily_stress"):
+    if (
+        oura_data.get("daily_stress")
+        and _endpoint_succeeded(oura_data, "daily_stress", "daily_stress")
+    ):
         stress = oura_data["daily_stress"][0]
         stress_sec = stress.get("stress_high")
         recovery_sec = stress.get("recovery_high")
-        metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
-        metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
+        metrics["stress_high"] = _duration_minutes_or_none(stress_sec)
+        metrics["recovery_high"] = _duration_minutes_or_none(recovery_sec)
         metrics["stress_day_summary"] = stress.get("day_summary")
 
-    # Workouts (aggregate if multiple)
-    if oura_data.get("workouts"):
-        workouts = oura_data["workouts"]
-        metrics["workout_count"] = len(workouts)
-        metrics["workout_calories"] = sum(w.get("calories", 0) or 0 for w in workouts)
-        metrics["workout_minutes"] = sum(
-            _workout_duration_minutes(w.get("start_datetime"), w.get("end_datetime"))
-            for w in workouts
-        )
-        metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
+    # Workouts (aggregate if multiple, store explicit zeros on a rest day)
+    _add_workout_metrics(metrics, oura_data)
 
     # Daytime heart rate
     if oura_data.get("daytime_hr"):
@@ -104,20 +147,25 @@ def extract_sleep_metrics(oura_data: dict) -> dict:
     # Detailed sleep
     if oura_data.get("sleep"):
         sleep_detail = oura_data["sleep"][0]
-        deep_sleep_sec = sleep_detail.get("deep_sleep_duration", 0)
-        light_sleep_sec = sleep_detail.get("light_sleep_duration", 0)
-        rem_sleep_sec = sleep_detail.get("rem_sleep_duration", 0)
-        total_sleep_sec = sleep_detail.get("total_sleep_duration", 0)
-
-        metrics["deep_sleep_minutes"] = deep_sleep_sec // 60 if deep_sleep_sec else None
-        metrics["light_sleep_minutes"] = light_sleep_sec // 60 if light_sleep_sec else None
-        metrics["rem_sleep_minutes"] = rem_sleep_sec // 60 if rem_sleep_sec else None
-        metrics["total_sleep_minutes"] = total_sleep_sec // 60 if total_sleep_sec else None
+        metrics["deep_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("deep_sleep_duration")
+        )
+        metrics["light_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("light_sleep_duration")
+        )
+        metrics["rem_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("rem_sleep_duration")
+        )
+        metrics["total_sleep_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("total_sleep_duration")
+        )
         metrics["sleep_efficiency"] = sleep_detail.get("efficiency")
         metrics["hrv"] = sleep_detail.get("average_hrv")
         metrics["avg_hr"] = sleep_detail.get("average_heart_rate")
         metrics["avg_breath"] = sleep_detail.get("average_breath")
-        metrics["latency_minutes"] = sleep_detail.get("latency", 0) // 60 if sleep_detail.get("latency") else None
+        metrics["latency_minutes"] = _duration_minutes_or_none(
+            sleep_detail.get("latency")
+        )
         metrics["restless_periods"] = sleep_detail.get("restless_periods")
         metrics["resting_hr"] = sleep_detail.get("lowest_heart_rate")
 
@@ -141,24 +189,19 @@ def extract_activity_metrics(oura_data: dict) -> dict:
         metrics["steps"] = activity.get("steps")
 
     # Daily stress (API returns seconds, convert to minutes)
-    if oura_data.get("daily_stress"):
+    if (
+        oura_data.get("daily_stress")
+        and _endpoint_succeeded(oura_data, "daily_stress", "daily_stress")
+    ):
         stress = oura_data["daily_stress"][0]
         stress_sec = stress.get("stress_high")
         recovery_sec = stress.get("recovery_high")
-        metrics["stress_high"] = round(stress_sec / 60) if stress_sec else None
-        metrics["recovery_high"] = round(recovery_sec / 60) if recovery_sec else None
+        metrics["stress_high"] = _duration_minutes_or_none(stress_sec)
+        metrics["recovery_high"] = _duration_minutes_or_none(recovery_sec)
         metrics["stress_day_summary"] = stress.get("day_summary")
 
     # Workouts
-    if oura_data.get("workouts"):
-        workouts = oura_data["workouts"]
-        metrics["workout_count"] = len(workouts)
-        metrics["workout_calories"] = sum(w.get("calories", 0) or 0 for w in workouts)
-        metrics["workout_minutes"] = sum(
-            _workout_duration_minutes(w.get("start_datetime"), w.get("end_datetime"))
-            for w in workouts
-        )
-        metrics["workout_activities"] = [w.get("activity") for w in workouts if w.get("activity")]
+    _add_workout_metrics(metrics, oura_data)
 
     # Daytime heart rate
     if oura_data.get("daytime_hr"):

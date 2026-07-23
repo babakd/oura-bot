@@ -12,7 +12,11 @@ from typing import Any, Callable, Optional
 
 import anthropic
 
-from oura_agent.config import CLAUDE_MODEL, logger
+from oura_agent.config import CLAUDE_FALLBACK_MODEL, CLAUDE_MODEL, logger
+from oura_agent.claude.models import (
+    create_message_with_fallback,
+    is_fable_access_error,
+)
 from oura_agent.prompts import load_prompt
 from oura_agent.storage.baselines import load_baselines
 from oura_agent.storage.conversations import (
@@ -24,6 +28,8 @@ from oura_agent.storage.interventions import (
     save_intervention_raw,
 )
 from oura_agent.storage.metrics import load_historical_metrics, load_recent_briefs
+from oura_agent.storage.profile import load_profile
+from oura_agent.storage.recommendations import summarize_feedback
 from oura_agent.telegram.client import _detect_image_mime_type
 from oura_agent.utils import now_nyc
 
@@ -64,7 +70,7 @@ def _build_system_blocks(static_prompt: str) -> list:
     cache breakpoint so it can change daily without invalidating the cache.
     """
     current_date = now_nyc().strftime("%Y-%m-%d")
-    return [
+    blocks = [
         {
             "type": "text",
             "text": static_prompt,
@@ -75,6 +81,29 @@ def _build_system_blocks(static_prompt: str) -> list:
             "text": f"Today is {current_date}.",
         },
     ]
+    profile = load_profile()
+    feedback = summarize_feedback()
+    feedback_counts = feedback.get("feedback_counts", {})
+    has_feedback_context = (
+        any(feedback_counts.values())
+        or bool(feedback.get("recent_cards"))
+        or bool(feedback.get("not_for_me_domains"))
+    )
+    if profile or has_feedback_context:
+        blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    "User-controlled personal context and explicit feedback follow. "
+                    "Use them for relevant advice; do not invent missing constraints.\n"
+                    + json.dumps(
+                        {"profile": profile, "daily_card_feedback": feedback},
+                        separators=(",", ":"),
+                    )
+                ),
+            }
+        )
+    return blocks
 
 
 TOOLS = [
@@ -149,10 +178,13 @@ TOOLS = [
     {
         "name": "correlate_intervention",
         "description": (
-            "Correlate a logged intervention (e.g. 'magnesium', 'alcohol', 'sauna') with a metric "
-            "(e.g. 'sleep_score', 'hrv', 'readiness'). Returns mean/std of the metric on nights "
-            "following days with the substance vs. nights following days without it, plus a delta. "
-            "Use for questions like 'does X help my sleep?' or 'what's the impact of alcohol on HRV?'"
+            "Compute a descriptive, observational comparison for a logged intervention "
+            "(e.g. 'magnesium', 'alcohol', 'sauna') and a metric (e.g. "
+            "'sleep_score', 'hrv', 'readiness'). Returns mean/std and sample size "
+            "for nights after a matching log versus other nights. Incomplete logging, "
+            "selection bias, concurrent behaviors, and confounding are not controlled. "
+            "Never describe the delta as a causal effect; if either n is below 3, "
+            "say the data is insufficient for a useful comparison."
         ),
         "input_schema": {
             "type": "object",
@@ -192,7 +224,10 @@ def execute_tool(name: str, tool_input: dict) -> str:
             start = tool_input["start_date"]
             end = tool_input["end_date"]
             include_detailed = bool(tool_input.get("include_detailed", False))
-            filtered = [m for m in all_metrics if start <= m.get("date", "") <= end]
+            filtered = sorted(
+                (m for m in all_metrics if start <= m.get("date", "") <= end),
+                key=lambda item: item.get("date", ""),
+            )
             result = []
             for m in filtered:
                 entry = {"date": m["date"], "summary": m.get("summary", {})}
@@ -214,7 +249,20 @@ def execute_tool(name: str, tool_input: dict) -> str:
                 "data_points": baselines.get("data_points", 0),
                 "last_updated": baselines.get("last_updated"),
                 "metrics": {
-                    k: {"mean": v.get("mean"), "std": v.get("std")}
+                    k: {
+                        "mean": (
+                            v.get("mean")
+                            if len(v.get("values", [])) >= 7
+                            else None
+                        ),
+                        "std": (
+                            v.get("std")
+                            if len(v.get("values", [])) >= 7
+                            else None
+                        ),
+                        "n": len(v.get("values", [])),
+                        "personal_baseline_ready": len(v.get("values", [])) >= 7,
+                    }
                     for k, v in baselines.get("metrics", {}).items()
                 },
             }
@@ -391,23 +439,87 @@ def handle_message_with_agent(
     max_iterations = 5
     progress_sent = False
 
+    active_model = CLAUDE_MODEL
     for iteration in range(max_iterations):
         try:
             if streamer is not None:
-                response = _run_streaming_iteration(client, system_blocks, messages, streamer)
+                try:
+                    response = _run_streaming_iteration(
+                        client,
+                        system_blocks,
+                        messages,
+                        streamer,
+                        model=active_model,
+                    )
+                except anthropic.APIStatusError as exc:
+                    if not is_fable_access_error(active_model, exc):
+                        raise
+                    logger.warning(
+                        "Streaming Fable unavailable (HTTP %s); serving with %s",
+                        getattr(exc, "status_code", "unknown"),
+                        CLAUDE_FALLBACK_MODEL,
+                    )
+                    response = client.messages.create(
+                        model=CLAUDE_FALLBACK_MODEL,
+                        max_tokens=16000,
+                        thinking={"type": "adaptive"},
+                        output_config={"effort": "high"},
+                        system=system_blocks,
+                        tools=TOOLS,
+                        messages=messages,
+                    )
+                    active_model = CLAUDE_FALLBACK_MODEL
+                if (
+                    getattr(response, "stop_reason", None) == "refusal"
+                    and active_model != CLAUDE_FALLBACK_MODEL
+                ):
+                    logger.warning(
+                        "Streaming chat was refused by %s; retrying on %s",
+                        active_model,
+                        CLAUDE_FALLBACK_MODEL,
+                    )
+                    response = client.messages.create(
+                        model=CLAUDE_FALLBACK_MODEL,
+                        max_tokens=16000,
+                        thinking={"type": "adaptive"},
+                        output_config={"effort": "high"},
+                        system=system_blocks,
+                        tools=TOOLS,
+                        messages=messages,
+                    )
+                    active_model = CLAUDE_FALLBACK_MODEL
             else:
-                response = client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=16000,
-                    thinking={"type": "adaptive"},
-                    output_config={"effort": "high"},
-                    system=system_blocks,
-                    tools=TOOLS,
-                    messages=messages,
+                call = create_message_with_fallback(
+                    client,
+                    {
+                        "max_tokens": 16000,
+                        "thinking": {"type": "adaptive"},
+                        "output_config": {"effort": "high"},
+                        "system": system_blocks,
+                        "tools": TOOLS,
+                        "messages": messages,
+                    },
+                    model=active_model,
                 )
+                response = call.response
+                active_model = call.model
         except anthropic.APIError as e:
             logger.error(f"Anthropic API error: {e}")
-            return "Sorry, I encountered an error. Please try again."
+            error_text = "Sorry, I encountered an error. Please try again."
+            if streamer is not None:
+                streamer.finalize(error_text)
+            return error_text
+
+        if getattr(response, "stop_reason", None) == "refusal":
+            refusal_text = (
+                "I couldn't safely complete that request. Try asking for a narrower "
+                "summary of your wellness data."
+            )
+            if streamer is not None:
+                streamer.finalize(refusal_text)
+            save_conversation_message("user", persisted_user_text)
+            save_conversation_message("assistant", refusal_text)
+            return refusal_text
 
         tool_uses = [b for b in response.content if b.type == "tool_use"]
 
@@ -522,20 +634,29 @@ calls but the brief itself should read as a single coherent message.
     messages = [{"role": "user", "content": seed}]
     last_response = None
 
+    active_model = CLAUDE_MODEL
     for iteration in range(max_iterations):
         try:
-            response = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=16000,
-                thinking={"type": "adaptive"},
-                output_config={"effort": "high"},
-                system=system_blocks,
-                tools=BRIEF_TOOLS,
-                messages=messages,
+            call = create_message_with_fallback(
+                client,
+                {
+                    "max_tokens": 16000,
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": "high"},
+                    "system": system_blocks,
+                    "tools": BRIEF_TOOLS,
+                    "messages": messages,
+                },
+                model=active_model,
             )
+            response = call.response
+            active_model = call.model
         except anthropic.APIError as e:
             logger.error(f"Brief API error: {e}")
-            return f"ERROR generating brief: {e}"
+            raise RuntimeError("Brief generation failed") from e
+
+        if getattr(response, "stop_reason", None) == "refusal":
+            raise RuntimeError("Brief generation was refused by all configured models")
 
         last_response = response
         # Only client-side tool uses block progress. Server tools
@@ -545,9 +666,10 @@ calls but the brief itself should read as a single coherent message.
 
         if not client_tool_uses:
             text_parts = [b.text for b in response.content if b.type == "text"]
-            return "\n\n".join(t for t in text_parts if t.strip()) or (
-                response.content[-1].text if response.content else ""
-            )
+            final_text = "\n\n".join(t for t in text_parts if t.strip())
+            if not final_text:
+                raise RuntimeError("Brief generation returned empty output")
+            return final_text
 
         tool_results = []
         for tu in client_tool_uses:
@@ -567,7 +689,7 @@ calls but the brief itself should read as a single coherent message.
         text_parts = [b.text for b in last_response.content if b.type == "text"]
         if text_parts:
             return "\n\n".join(text_parts)
-    return "ERROR: brief agent exhausted iterations without final output"
+    raise RuntimeError("Brief agent exhausted iterations without final output")
 
 
 def _run_streaming_iteration(
@@ -575,11 +697,12 @@ def _run_streaming_iteration(
     system_blocks: list,
     messages: list,
     streamer: Any,
+    model: str = CLAUDE_MODEL,
 ):
     """One streaming pass: push text deltas into the streamer, return the final Message."""
     accumulated = ""
     with client.messages.stream(
-        model=CLAUDE_MODEL,
+        model=model,
         max_tokens=16000,
         thinking={"type": "adaptive"},
         output_config={"effort": "high"},

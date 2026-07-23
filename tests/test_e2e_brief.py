@@ -6,8 +6,29 @@ Tests the full flow: Oura fetch -> extraction -> Claude analysis -> Telegram sen
 
 import json
 import pytest
-from unittest.mock import MagicMock, patch, call
-from pathlib import Path
+from types import SimpleNamespace
+
+
+def _generated_card(text):
+    """Build the model boundary object returned by the daily-card generator."""
+    return SimpleNamespace(
+        text=text,
+        card={
+            "headline": "Protect tonight's recovery",
+            "observation": "Recovery is the clearest signal in today's data.",
+            "decision": "Keep today's training easy and protect bedtime.",
+            "action_domain": "recovery",
+            "evidence_keys": ["readiness"],
+            "confidence": "medium",
+            "no_action": False,
+            "review_after": "Review tomorrow morning",
+            "expected_outcome": "A steadier recovery signal tomorrow.",
+        },
+        model="claude-opus-4-8",
+        stop_reason="end_turn",
+        fallback_used=False,
+        deterministic_fallback=False,
+    )
 
 
 class TestMorningBriefE2E:
@@ -56,20 +77,36 @@ class TestMorningBriefE2E:
         monkeypatch.setattr(modal_agent, "get_oura_sleep_data", lambda token, date: sleep_data)
         monkeypatch.setattr(modal_agent, "get_oura_activity_data", lambda token, date: activity_data)
 
-        # Mock Claude API call
+        # Mock the structured model boundary. Deterministic packet construction,
+        # persistence, and delivery still run end-to-end.
         mock_brief_content = "# Test Brief\n\nThis is a mock morning brief."
         monkeypatch.setattr(
             modal_agent,
-            "generate_brief_with_agent",
-            lambda *args, **kwargs: mock_brief_content
+            "generate_daily_card",
+            lambda *args, **kwargs: _generated_card(mock_brief_content),
         )
 
         # Mock Telegram send
         telegram_calls = []
-        def mock_send_telegram(msg, token, chat_id):
-            telegram_calls.append({"message": msg, "token": token, "chat_id": chat_id})
-            return True
-        monkeypatch.setattr(modal_agent, "send_telegram", mock_send_telegram)
+        def mock_send_telegram_message(
+            msg,
+            token,
+            chat_id,
+            reply_markup=None,
+            **kwargs,
+        ):
+            telegram_calls.append({
+                "message": msg,
+                "token": token,
+                "chat_id": chat_id,
+                "reply_markup": reply_markup,
+            })
+            return 123
+        monkeypatch.setattr(
+            modal_agent,
+            "send_telegram_message",
+            mock_send_telegram_message,
+        )
 
         # Mock volume.commit (can't run outside Modal)
         monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
@@ -80,7 +117,10 @@ class TestMorningBriefE2E:
         # Verify success
         assert result["status"] == "success"
         assert result["date"] == "2026-01-15"
-        assert "metrics" in result
+        assert "metrics" not in result
+        assert modal_agent.coordination.get(
+            f"telegram-delivery:{result['card_id']}"
+        )["state"] == "sent"
 
         # Verify brief was saved
         brief_file = temp_data_dir / "briefs" / "2026-01-15.md"
@@ -104,6 +144,7 @@ class TestMorningBriefE2E:
         assert len(telegram_calls) == 1
         assert "*Morning Brief" in telegram_calls[0]["message"]
         assert mock_brief_content in telegram_calls[0]["message"]
+        assert telegram_calls[0]["reply_markup"]["inline_keyboard"]
 
     def test_morning_brief_no_sleep_data(
         self,
@@ -144,16 +185,26 @@ class TestMorningBriefE2E:
         mock_brief_content = "# Partial Brief\n\nSleep not recorded. Focus on activity data."
         monkeypatch.setattr(
             modal_agent,
-            "generate_brief_with_agent",
-            lambda *args, **kwargs: mock_brief_content
+            "generate_daily_card",
+            lambda *args, **kwargs: _generated_card(mock_brief_content),
         )
 
         # Mock Telegram send
         telegram_calls = []
-        def mock_send_telegram(msg, token, chat_id):
-            telegram_calls.append({"message": msg})
-            return True
-        monkeypatch.setattr(modal_agent, "send_telegram", mock_send_telegram)
+        def mock_send_telegram_message(
+            msg,
+            token,
+            chat_id,
+            reply_markup=None,
+            **kwargs,
+        ):
+            telegram_calls.append({"message": msg, "reply_markup": reply_markup})
+            return 124
+        monkeypatch.setattr(
+            modal_agent,
+            "send_telegram_message",
+            mock_send_telegram_message,
+        )
 
         # Mock volume.commit
         monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
@@ -165,9 +216,12 @@ class TestMorningBriefE2E:
         assert result["status"] == "success"
         assert result["date"] == "2026-01-15"
 
-        # Verify metrics include sleep_recorded flag
-        assert "metrics" in result
-        assert result["metrics"].get("sleep_recorded") == False
+        # Health metrics stay in the private Volume rather than the function
+        # result payload.
+        metrics_file = temp_data_dir / "metrics" / "2026-01-15.json"
+        saved_metrics = json.loads(metrics_file.read_text())
+        assert saved_metrics["summary"].get("sleep_recorded") is False
+        assert "metrics" not in result
 
         # Verify brief was sent to Telegram
         assert len(telegram_calls) == 1
@@ -217,15 +271,19 @@ class TestMorningBriefE2E:
         monkeypatch.setattr(modal_agent, "get_oura_sleep_data", lambda token, date: sleep_data)
         monkeypatch.setattr(modal_agent, "get_oura_activity_data", lambda token, date: activity_data)
 
-        # Track Claude API call arguments
-        claude_calls = []
-        def mock_generate_brief(*args, **kwargs):
-            claude_calls.append({"args": args, "kwargs": kwargs})
-            return "# First Run Brief"
-        monkeypatch.setattr(modal_agent, "generate_brief_with_agent", mock_generate_brief)
+        # Track the deterministic packet passed to the structured model boundary.
+        card_calls = []
+        def mock_generate_card(api_key, packet):
+            card_calls.append({"api_key": api_key, "packet": packet})
+            return _generated_card("# First Run Brief")
+        monkeypatch.setattr(modal_agent, "generate_daily_card", mock_generate_card)
 
         # Mock Telegram and volume
-        monkeypatch.setattr(modal_agent, "send_telegram", lambda *args: True)
+        monkeypatch.setattr(
+            modal_agent,
+            "send_telegram_message",
+            lambda *args, **kwargs: 125,
+        )
         monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
 
         # Run the morning brief
@@ -234,12 +292,11 @@ class TestMorningBriefE2E:
         # Verify success
         assert result["status"] == "success"
 
-        # Verify Claude was called once
-        assert len(claude_calls) == 1
-        # New signature: (api_key, today, metrics, detailed_sleep, detailed_workouts)
-        # Brief agent no longer receives baselines upfront — it fetches via tools.
-        assert claude_calls[0]["args"][1] == "2026-01-15"
-        assert "sleep_score" in claude_calls[0]["args"][2] or claude_calls[0]["args"][2].get("sleep_recorded") is False
+        # Verify the model selector was called once with a fully built packet.
+        assert len(card_calls) == 1
+        assert card_calls[0]["api_key"] == "test-anthropic-key"
+        assert card_calls[0]["packet"]["date"] == "2026-01-15"
+        assert "sleep_score" in card_calls[0]["packet"]["metrics"]
 
         # Verify baselines file was created (still loaded for post-brief update path)
         baselines_file = temp_data_dir / "baselines.json"
@@ -289,21 +346,88 @@ class TestMorningBriefEdgeCases:
 
         # Mock Claude
         mock_brief = "# Brief Content"
-        monkeypatch.setattr(modal_agent, "generate_brief_with_agent", lambda *args, **kwargs: mock_brief)
+        monkeypatch.setattr(
+            modal_agent,
+            "generate_daily_card",
+            lambda *args, **kwargs: _generated_card(mock_brief),
+        )
 
         # Mock Telegram to fail
-        monkeypatch.setattr(modal_agent, "send_telegram", lambda *args: False)
+        monkeypatch.setattr(
+            modal_agent,
+            "send_telegram_message",
+            lambda *args, **kwargs: None,
+        )
+        # The generic failure notification is a separate best-effort send.
+        monkeypatch.setattr(modal_agent, "send_telegram", lambda *args: True)
 
         # Mock volume
         monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
 
-        # Run the morning brief
-        result = modal_agent.morning_brief.local()
-
-        # Verify success (should still succeed even with Telegram failure)
-        assert result["status"] == "success"
+        # Delivery failure is surfaced so Modal can retry/alert, while the
+        # generated artifact remains safely persisted.
+        with pytest.raises(RuntimeError, match="Telegram delivery failed"):
+            modal_agent.morning_brief.local()
 
         # Verify brief was saved
         brief_file = temp_data_dir / "briefs" / "2026-01-15.md"
         assert brief_file.exists()
         assert brief_file.read_text() == mock_brief
+
+        delivery_states = [
+            value
+            for key, value in modal_agent.coordination.values.items()
+            if key.startswith("telegram-delivery:")
+        ]
+        assert len(delivery_states) == 1
+        assert delivery_states[0]["state"] == "failed"
+
+    def test_distributed_sent_marker_prevents_ambiguous_duplicate(
+        self,
+        temp_data_dir,
+        mock_now_nyc,
+        monkeypatch,
+        sample_baselines,
+    ):
+        """A crash after Telegram acceptance must not trigger a second send."""
+        import modal_agent
+        from oura_agent.insights import (
+            build_daily_insight_packet,
+            default_card_from_packet,
+            render_daily_card,
+        )
+        from oura_agent.storage.recommendations import save_daily_card
+
+        packet = build_daily_insight_packet(
+            "2026-01-15",
+            {"sleep_recorded": True, "sleep_score": 80},
+            {"bedtime_end": "2026-01-15T07:15:00-05:00"},
+            [],
+            sample_baselines,
+        )
+        card = default_card_from_packet(packet)
+        entry = save_daily_card(
+            "2026-01-15",
+            card,
+            render_daily_card(card, packet),
+            packet,
+            model="deterministic",
+        )
+        modal_agent.coordination.put(
+            f"telegram-delivery:{entry['id']}",
+            {"state": "sent", "message_id": 999},
+        )
+        monkeypatch.setattr(modal_agent.volume, "commit", lambda: None)
+
+        monkeypatch.setattr(
+            modal_agent,
+            "get_oura_sleep_data",
+            lambda *args: (_ for _ in ()).throw(
+                AssertionError("duplicate run must stop before Oura fetch")
+            ),
+        )
+
+        result = modal_agent.morning_brief.local(force=False)
+
+        assert result["status"] == "already_sent"
+        assert result["card_id"] == entry["id"]

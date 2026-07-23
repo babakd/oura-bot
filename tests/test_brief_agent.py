@@ -117,7 +117,7 @@ class TestBriefAgentLoop:
         assert "Running the numbers" in brief
         assert "Real answer" in brief
 
-    def test_brief_uses_opus_4_7_and_cached_system(
+    def test_brief_uses_opus_4_8_and_cached_system(
         self, temp_data_dir, mock_now_nyc, monkeypatch
     ):
         mock_client = self._mock_client(
@@ -130,7 +130,7 @@ class TestBriefAgentLoop:
             detailed_workouts=[],
         )
         call = mock_client.messages.create.call_args
-        assert call.kwargs["model"] == "claude-opus-4-7"
+        assert call.kwargs["model"] == "claude-opus-4-8"
         system = call.kwargs["system"]
         assert isinstance(system, list)
         assert system[0].get("cache_control", {}).get("type") == "ephemeral"
@@ -181,12 +181,13 @@ class TestBriefAgentLoop:
         (temp_data_dir / "baselines.json").write_text(json.dumps({
             "data_points": 1, "metrics": {}
         }))
-        handlers.generate_brief_with_agent(
-            "fake-key", "2026-01-15",
-            metrics={"sleep_score": 82},
-            detailed_sleep={},
-            detailed_workouts=[],
-        )
+        with pytest.raises(RuntimeError, match="exhausted"):
+            handlers.generate_brief_with_agent(
+                "fake-key", "2026-01-15",
+                metrics={"sleep_score": 82},
+                detailed_sleep={},
+                detailed_workouts=[],
+            )
         # Should allow at least 8 iterations before giving up
         assert mock_client.messages.create.call_count >= 8
 

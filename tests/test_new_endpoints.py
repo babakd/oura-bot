@@ -78,7 +78,7 @@ class TestExtractMetricsWorkouts:
         assert "strength_training" in metrics["workout_activities"]
 
     def test_extract_workout_metrics_missing(self):
-        """Test extraction when no workouts."""
+        """A successfully fetched rest day is represented by explicit zeros."""
         data = {
             "workouts": [],
             "daily_sleep": [],
@@ -87,8 +87,10 @@ class TestExtractMetricsWorkouts:
         }
         metrics = modal_agent.extract_metrics(data)
 
-        assert "workout_count" not in metrics
-        assert "workout_calories" not in metrics
+        assert metrics["workout_count"] == 0
+        assert metrics["workout_calories"] == 0
+        assert metrics["workout_minutes"] == 0
+        assert metrics["workout_activities"] == []
 
     def test_extract_workout_with_null_calories(self):
         """Test extraction when calories is null."""

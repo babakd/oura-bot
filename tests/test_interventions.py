@@ -13,41 +13,44 @@ class TestSaveInterventionRaw:
     """Tests for save_intervention_raw() function."""
 
     def test_save_intervention_raw_creates_file(self, temp_data_dir, mock_now_nyc):
-        """Test saving intervention creates JSONL file."""
+        """Test saving intervention creates one immutable event file."""
         entry = modal_agent.save_intervention_raw("took 2 magnesium capsules")
 
         assert entry["raw"] == "took 2 magnesium capsules"
         assert entry["cleaned"] == "took 2 magnesium capsules"  # Falls back to raw when no cleaned provided
         assert entry["time"] == "10:30"  # From mock_now_nyc
 
-        # Check JSONL file was created
-        interventions_file = temp_data_dir / "interventions" / "2026-01-15.jsonl"
-        assert interventions_file.exists()
-
-        # Read JSONL format
-        with open(interventions_file) as f:
-            lines = [json.loads(line) for line in f if line.strip()]
-
-        assert len(lines) == 1
-        assert lines[0]["raw"] == "took 2 magnesium capsules"
+        event_files = list(
+            (
+                temp_data_dir
+                / "interventions"
+                / ".events"
+                / "2026-01-15"
+            ).glob("*.json")
+        )
+        assert len(event_files) == 1
+        assert json.loads(event_files[0].read_text())["raw"] == (
+            "took 2 magnesium capsules"
+        )
+        assert modal_agent.load_interventions("2026-01-15")["entries"] == [
+            entry
+        ]
 
     def test_save_intervention_raw_appends_to_existing(self, temp_data_dir, mock_now_nyc):
-        """Test saving multiple interventions appends to same JSONL file."""
+        """Test saving multiple interventions preserves every immutable event."""
         modal_agent.save_intervention_raw("magnesium 400mg")
         modal_agent.save_intervention_raw("20 min sauna")
         modal_agent.save_intervention_raw("glass of wine")
 
-        interventions_file = temp_data_dir / "interventions" / "2026-01-15.jsonl"
-        with open(interventions_file) as f:
-            lines = [json.loads(line) for line in f if line.strip()]
-
-        assert len(lines) == 3
-        assert lines[0]["raw"] == "magnesium 400mg"
-        assert lines[1]["raw"] == "20 min sauna"
-        assert lines[2]["raw"] == "glass of wine"
+        entries = modal_agent.load_interventions("2026-01-15")["entries"]
+        assert [entry["raw"] for entry in entries] == [
+            "magnesium 400mg",
+            "20 min sauna",
+            "glass of wine",
+        ]
 
     def test_save_intervention_raw_atomic_append(self, temp_data_dir, mock_now_nyc):
-        """Test that save_intervention_raw uses atomic append (no read required)."""
+        """Test an immutable event remains readable with existing base data."""
         # Create a JSONL file with existing content
         interventions_file = temp_data_dir / "interventions" / "2026-01-15.jsonl"
         with open(interventions_file, "w") as f:
@@ -56,12 +59,11 @@ class TestSaveInterventionRaw:
         # Add new entry via save_intervention_raw
         modal_agent.save_intervention_raw("evening supplement")
 
-        with open(interventions_file) as f:
-            lines = [json.loads(line) for line in f if line.strip()]
-
-        assert len(lines) == 2
-        assert lines[0]["raw"] == "morning coffee"
-        assert lines[1]["raw"] == "evening supplement"
+        entries = modal_agent.load_interventions("2026-01-15")["entries"]
+        assert [entry["raw"] for entry in entries] == [
+            "morning coffee",
+            "evening supplement",
+        ]
 
 
 class TestLoadInterventions:
@@ -215,8 +217,8 @@ class TestSaveInterventions:
         assert len(lines) == 1
         assert lines[0]["raw"] == "test"
 
-    def test_save_interventions_removes_legacy_json(self, temp_data_dir):
-        """Test saving interventions removes legacy JSON file."""
+    def test_save_interventions_preserves_legacy_json(self, temp_data_dir):
+        """Test saving keeps a legacy JSON recovery source."""
         # Create legacy JSON file
         json_file = temp_data_dir / "interventions" / "2026-01-15.json"
         with open(json_file, "w") as f:
@@ -226,8 +228,8 @@ class TestSaveInterventions:
         data = {"date": "2026-01-15", "entries": [{"time": "10:00", "raw": "test", "parsed": None}]}
         modal_agent.save_interventions("2026-01-15", data)
 
-        # Legacy file should be removed
-        assert not json_file.exists()
+        # Legacy input is retained as a recoverable source.
+        assert json_file.exists()
 
         # JSONL file should exist
         jsonl_file = temp_data_dir / "interventions" / "2026-01-15.jsonl"

@@ -38,6 +38,29 @@ class TestExtractMetrics:
         metrics = modal_agent.extract_metrics({})
         assert metrics == {}
 
+    def test_extract_metrics_preserves_valid_zero_sleep_durations(self):
+        data = {
+            "sleep": [
+                {
+                    "deep_sleep_duration": 0,
+                    "light_sleep_duration": 0,
+                    "rem_sleep_duration": 0,
+                    "total_sleep_duration": 0,
+                    "latency": 0,
+                }
+            ]
+        }
+
+        metrics = modal_agent.extract_metrics(data)
+        sleep_metrics = modal_agent.extract_sleep_metrics(data)
+
+        for extracted in (metrics, sleep_metrics):
+            assert extracted["deep_sleep_minutes"] == 0
+            assert extracted["light_sleep_minutes"] == 0
+            assert extracted["rem_sleep_minutes"] == 0
+            assert extracted["total_sleep_minutes"] == 0
+            assert extracted["latency_minutes"] == 0
+
     def test_extract_metrics_missing_sleep(self):
         """Test extraction when sleep data is missing."""
         data = {
