@@ -210,6 +210,34 @@ def test_invalid_model_evidence_rejects_the_whole_selection(sample_baselines):
     assert normalized == fallback
 
 
+def test_model_card_rejects_more_than_two_evidence_keys(sample_baselines):
+    packet = _packet(sample_baselines)
+    too_many = {
+        "headline": "Steady day",
+        "observation": "No meaningful deviation.",
+        "decision": "Follow your normal plan.",
+        "action_domain": "no_action",
+        "evidence_keys": ["sleep_score", "readiness", "hrv"],
+        "confidence": "medium",
+        "no_action": True,
+        "review_after": "tomorrow",
+        "expected_outcome": "observe what follows",
+    }
+
+    with pytest.raises(ValueError, match="at most two"):
+        validate_model_card(too_many, packet)
+
+
+def test_anthropic_output_schema_uses_supported_constraints():
+    from oura_agent.claude.brief_card import CARD_SCHEMA
+
+    encoded = json.dumps(CARD_SCHEMA)
+    assert '"maxItems"' not in encoded
+    assert '"maxLength"' not in encoded
+    assert '"enum"' not in encoded
+    assert "At most two metric keys" in encoded
+
+
 def test_yesterday_activity_keeps_its_source_date_and_is_not_duplicated(
     sample_baselines,
 ):

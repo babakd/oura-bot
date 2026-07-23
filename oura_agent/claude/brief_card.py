@@ -24,25 +24,43 @@ from oura_agent.prompts import load_prompt
 CARD_SCHEMA = {
     "type": "object",
     "properties": {
-        "headline": {"type": "string", "maxLength": 72},
-        "observation": {"type": "string", "maxLength": 360},
-        "decision": {"type": "string", "maxLength": 190},
+        "headline": {
+            "type": "string",
+            "description": "Plain-text headline, no more than 72 characters.",
+        },
+        "observation": {
+            "type": "string",
+            "description": "One or two plain-text sentences, no more than 360 characters.",
+        },
+        "decision": {
+            "type": "string",
+            "description": "Short plain-text decision, no more than 190 characters.",
+        },
         "action_domain": {
             "type": "string",
-            "enum": CANONICAL_ACTION_DOMAINS,
+            "description": "Exactly one of: " + ", ".join(CANONICAL_ACTION_DOMAINS),
         },
         "evidence_keys": {
             "type": "array",
             "items": {
                 "type": "string",
-                "enum": DECISION_METRIC_KEYS,
+                "description": "Exactly one of: " + ", ".join(DECISION_METRIC_KEYS),
             },
-            "maxItems": 2,
+            "description": "At most two metric keys, ordered by decision relevance.",
         },
-        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "confidence": {
+            "type": "string",
+            "description": "Exactly one of: low, medium, high.",
+        },
         "no_action": {"type": "boolean"},
-        "review_after": {"type": "string", "maxLength": 60},
-        "expected_outcome": {"type": "string", "maxLength": 160},
+        "review_after": {
+            "type": "string",
+            "description": "Plain-text review timing, no more than 60 characters.",
+        },
+        "expected_outcome": {
+            "type": "string",
+            "description": "Non-causal observation target, no more than 160 characters.",
+        },
     },
     "required": [
         "headline",

@@ -572,6 +572,8 @@ def validate_model_card(card: dict, packet: dict) -> None:
         not isinstance(key, str) for key in raw_keys
     ):
         raise ValueError("evidence_keys must be a list of strings")
+    if len(raw_keys) > 2:
+        raise ValueError("daily card may use at most two evidence keys")
 
     packet_metrics = packet.get("metrics", {})
     allowed_metrics = {
