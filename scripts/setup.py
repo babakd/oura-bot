@@ -834,6 +834,8 @@ Examples:
             print_success(msg)
             if user_data.get("email"):
                 print_info(f"Account: {user_data.get('email')}")
+            # Store Oura user data for profile
+            config["_OURA_USER_DATA"] = user_data
             break
         print_error(msg)
         if not confirm("Try again?"):
@@ -956,6 +958,72 @@ Examples:
     config["TELEGRAM_WEBHOOK_SECRET"] = webhook_secret
 
     # =========================================================================
+    # Stage 5.5: Personalization (Optional)
+    # =========================================================================
+    profile = None
+    oura_user_data = config.get("_OURA_USER_DATA", {})
+
+    print()
+    print(f"{BLUE}{BOLD}[Optional] Personalization{RESET}")
+    print("-" * 50)
+    print("A few quick questions to personalize your morning briefs.\n")
+
+    if confirm("Would you like to customize your profile?"):
+        # Name
+        name = prompt_input("Your first name (optional)", "")
+
+        # Primary goals
+        print("\nWhat are your primary health goals? (comma-separated numbers)")
+        print("  1. Optimize deep sleep")
+        print("  2. Improve HRV / recovery")
+        print("  3. Cognitive performance")
+        print("  4. Athletic performance")
+        print("  5. Stress management")
+        goals_input = prompt_input("Choose [1-5]", "1,2,3")
+
+        goal_map = {
+            "1": "optimize_deep_sleep",
+            "2": "improve_hrv",
+            "3": "cognitive_performance",
+            "4": "athletic_performance",
+            "5": "stress_management",
+        }
+        selected_goals = []
+        for g in goals_input.replace(" ", "").split(","):
+            if g in goal_map:
+                selected_goals.append(goal_map[g])
+
+        # Chronotype
+        print("\nAre you naturally a:")
+        print("  1. Morning person (prefer waking early)")
+        print("  2. Night owl (prefer staying up late)")
+        print("  3. Somewhere in between")
+        chronotype_input = prompt_input("Choose [1-3]", "3")
+        chronotype_map = {"1": "early", "2": "late", "3": "neutral"}
+        chronotype = chronotype_map.get(chronotype_input, "neutral")
+
+        # Build profile
+        profile = {
+            "user": {
+                "name": name if name else None,
+                "age": oura_user_data.get("age"),
+                "biological_sex": oura_user_data.get("biological_sex"),
+                "timezone": config.get("_TIMEZONE", "America/New_York"),
+                "chronotype": chronotype,
+            },
+            "preferences": {
+                "primary_goals": selected_goals if selected_goals else ["optimize_deep_sleep", "improve_hrv"],
+                "communication_style": "thoughtful_coach",
+            },
+        }
+        # Remove None values from user dict
+        profile["user"] = {k: v for k, v in profile["user"].items() if v is not None}
+
+        print_success("Profile configured")
+    else:
+        print_info("Skipping personalization - you can configure later")
+
+    # =========================================================================
     # Stage 6: Save Configuration
     # =========================================================================
     print_stage(6, "Save Configuration")
@@ -1072,6 +1140,34 @@ Examples:
                 else:
                     print_info("Deployment succeeded but webhook URL not detected")
                     print_info("You may need to register the webhook manually")
+
+                # Upload profile to Modal volume if configured
+                if profile:
+                    print_info("Uploading profile to Modal...")
+                    try:
+                        result = subprocess.run(
+                            [
+                                "modal",
+                                "run",
+                                "modal_agent.py::upload_profile",
+                                "--profile-json",
+                                json.dumps(profile),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            cwd=PROJECT_ROOT,
+                        )
+                        if result.returncode == 0:
+                            print_success("Profile saved to Modal volume")
+                        else:
+                            print_error("Failed to upload profile")
+                            if result.stderr:
+                                print_dim(f"   {result.stderr[:100]}")
+                    except subprocess.TimeoutExpired:
+                        print_error("Profile upload timed out")
+                    except Exception as e:
+                        print_error(f"Profile upload error: {e}")
         else:
             print_info("Skipping deployment - Modal not available")
 

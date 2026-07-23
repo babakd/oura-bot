@@ -44,10 +44,10 @@ oura-agent/
 │   └── claude/             # Claude AI handlers + agent with tools
 ├── prompts/                # System prompts
 │   ├── morning_brief.md    # Morning brief generation
-│   └── agent.md            # Agent with tools for chat interactions
+│   └── agent.md            # Chat/intervention agent with tools
 ├── scripts/                # Utilities
 │   └── setup.py            # Interactive setup wizard
-└── tests/                  # Test suite (134 tests)
+└── tests/                  # Test suite (190 tests)
 ```
 
 ## Prerequisites
@@ -273,6 +273,16 @@ modal deploy modal_agent.py
 
 ## Troubleshooting
 
+Run the non-destructive doctor first:
+
+```bash
+python scripts/doctor.py
+```
+
+The doctor checks local credentials, Telegram webhook registration, and Modal
+HTTP reachability. It does not send Telegram messages, call `/clear`, or touch
+the Modal volume.
+
 ### "No data returned from Oura"
 Oura data syncs when you open the app. Make sure to open the Oura app before the morning brief runs.
 
@@ -287,7 +297,12 @@ Oura data syncs when you open the app. Make sure to open the Oura app before the
    curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
    ```
 2. Check that `secret_token` matches `TELEGRAM_WEBHOOK_SECRET` in Modal secrets
-3. Check Modal logs for 401 errors
+3. Check Modal reachability:
+   ```bash
+   python scripts/doctor.py
+   ```
+4. If Modal reports `workspace ... disabled`, `Resource exhausted`, or `billing cycle spend limit reached`, raise the Modal workspace spend limit or wait for the next billing cycle. Telegram cannot reach the webhook until Modal HTTP is re-enabled.
+5. Check Modal logs for 401 errors
 
 ## License
 

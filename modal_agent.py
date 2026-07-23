@@ -143,6 +143,57 @@ def _reload_volume():
 
 
 # ============================================================================
+# PROFILE MANAGEMENT
+# ============================================================================
+
+PROFILE_FILE = "/data/profile.json"
+
+
+def load_profile() -> dict:
+    """
+    Load user profile for personalization.
+
+    Returns profile dict with user preferences, or empty dict if not configured.
+    Profile includes: name, age, timezone, chronotype, primary_goals, etc.
+    """
+    if os.path.exists(PROFILE_FILE):
+        try:
+            with open(PROFILE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Could not load profile: {e}")
+    return {}
+
+
+@app.function(volumes={"/data": volume})
+def upload_profile(profile_json: str):
+    """
+    Upload user profile to Modal volume.
+
+    Called by setup.py after collecting personalization preferences.
+    Args:
+        profile_json: JSON string of the profile data
+    Returns:
+        dict with status and path
+    """
+    try:
+        profile = json.loads(profile_json)
+
+        ensure_directories()
+
+        with open(PROFILE_FILE, "w") as f:
+            json.dump(profile, f, indent=2)
+
+        volume.commit()
+
+        logger.info(f"Profile saved to {PROFILE_FILE}")
+        return {"status": "ok", "path": PROFILE_FILE}
+    except Exception as e:
+        logger.error(f"Failed to save profile: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+# ============================================================================
 # MAIN AGENT FUNCTION
 # ============================================================================
 
@@ -241,6 +292,11 @@ def morning_brief():
         # needed.
         baselines = load_baselines()
 
+        # Load user profile for personalization
+        profile = load_profile()
+        if profile:
+            logger.info(f"Loaded user profile: {profile.get('user', {}).get('name', 'unnamed')}")
+
         logger.info("Generating brief with Claude Opus 4.7 (tool-using agent)...")
         brief_content = generate_brief_with_agent(
             anthropic_key,
@@ -248,6 +304,7 @@ def morning_brief():
             metrics,
             detailed_sleep,
             detailed_workouts,
+            profile,
         )
 
         # Save brief

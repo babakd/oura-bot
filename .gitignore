@@ -2,6 +2,7 @@
 .env
 .env.local
 *.env
+.env_*
 
 # Python
 __pycache__/
@@ -22,6 +23,8 @@ data/
 *.json.backup
 
 # Development files
+.coverage
+.coverage.*
 checkpoint*.txt
 oura_agent.md
 codex_fixes.md

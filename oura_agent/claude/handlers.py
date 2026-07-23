@@ -16,6 +16,7 @@ def generate_brief_with_agent(
     metrics: dict,
     detailed_sleep: dict,
     detailed_workouts: list,
+    profile: dict = None,
 ) -> str:
     """Generate the morning brief via the tool-using agent.
 
@@ -28,6 +29,7 @@ def generate_brief_with_agent(
         metrics=metrics,
         detailed_sleep=detailed_sleep,
         detailed_workouts=detailed_workouts,
+        profile=profile,
     )
 
 

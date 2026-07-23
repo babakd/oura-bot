@@ -457,6 +457,7 @@ def run_brief_agent(
     metrics: dict,
     detailed_sleep: dict,
     detailed_workouts: list,
+    profile: Optional[dict] = None,
     max_iterations: int = 10,
 ) -> str:
     """Run the morning brief as a tool-using agent.
@@ -496,6 +497,20 @@ YESTERDAY'S WORKOUTS
 ```json
 {json.dumps(detailed_workouts, indent=2)}
 ```
+"""
+
+    if profile:
+        seed += f"""
+═══════════════════════════════════════════════════════════════════════════════
+USER PROFILE
+═══════════════════════════════════════════════════════════════════════════════
+
+```json
+{json.dumps(profile, indent=2)}
+```
+"""
+
+    seed += """
 
 Use your tools to pull any additional context you need — baselines, historical
 metrics, interventions, correlations, recent briefs. Compute real statistics
